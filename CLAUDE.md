@@ -43,8 +43,8 @@ main.py                 → TradingBot orchestrator with APScheduler
 1. **09:25** - Pre-market scan (gap + sentiment analysis)
 2. **09:45** - ORB calculation for watchlist (first 15 min high/low)
 3. **09:46** - Breakout monitoring starts (10-sec intervals)
-4. **09:46-11:30** - Signal detection → Telegram alert → User confirm → Execute
-5. **11:30** - Force close positions, daily summary
+4. **09:46-16:00** - Signal detection → Telegram alert → User confirm → Execute
+5. **16:00** - Force close positions, daily summary (market close)
 
 ### Signal Generation
 

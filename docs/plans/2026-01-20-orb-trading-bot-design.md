@@ -21,7 +21,7 @@ Semi-autonomous day trading bot using Opening Range Breakout (ORB) strategy with
 | **Capital** | $10,000 - $25,000 |
 | **Risk per trade** | 2% max |
 | **Trades per day** | 1-3 max |
-| **Trading hours** | 9:30 - 11:30 AM EST |
+| **Trading hours** | 9:30 AM - 16:00 EST (market close) |
 | **Mode** | Semi-autonomous (Telegram confirmation) |
 | **Broker** | Alpaca (Paper Trading) |
 
@@ -47,7 +47,7 @@ For each ticker in watchlist:
 - Record LOW of first 15 minutes
 - Calculate range = HIGH - LOW
 
-### Entry Signals (9:45 - 11:30 AM EST)
+### Entry Signals (9:45 AM - 16:00 EST)
 
 **LONG if:**
 - Price breaks ABOVE ORB High
@@ -66,7 +66,7 @@ For each ticker in watchlist:
 - **Stop Loss:** Opposite side of ORB (if LONG → stop at ORB Low)
 - **Take Profit:** 2:1 ratio (risk $200 → target $400)
 - **Position Size:** (Capital × 2%) / Distance to Stop
-- **Session Close:** Force close all positions at 11:30 AM EST
+- **Session Close:** Force close all positions at 16:00 EST (market close)
 
 ---
 
@@ -103,7 +103,7 @@ For each ticker in watchlist:
 │                              ▼                              │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
 │  │   EXECUTE    │───▶│   MONITOR    │───▶│ AUTO CLOSE   │  │
-│  │   If YES     │    │  Stop/Target │    │  11:30 AM    │  │
+│  │   If YES     │    │  Stop/Target │    │  16:00 EST   │  │
 │  └──────────────┘    └──────────────┘    └──────────────┘  │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -180,9 +180,9 @@ alpaca-trading-bot/
 2. **09:25 AM** - Telegram alert with watchlist
 3. **09:30 AM** - Market opens, start calculating Opening Range
 4. **09:45 AM** - ORB defined, start monitoring for breakouts
-5. **09:45-11:30 AM** - Signal detection, Telegram alerts, wait for confirmation
+5. **09:45 AM - 16:00** - Signal detection, Telegram alerts, wait for confirmation
 6. **On confirmation** - Execute order, monitor position
-7. **11:30 AM** - Force close all positions, send daily summary
+7. **16:00** - Force close all positions, send daily summary (market close)
 
 ---
 
@@ -242,7 +242,7 @@ alpaca-trading-bot/
 | Slippage | Use limit orders when possible |
 | Overtrading | Hard limit of 3 trades/day |
 | False breakouts | VWAP + Volume confirmation |
-| Overnight positions | Force close at 11:30 AM |
+| Overnight positions | Force close at 16:00 (market close) |
 
 ---
 

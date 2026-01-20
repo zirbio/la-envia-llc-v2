@@ -266,7 +266,7 @@ Win Rate: {win_rate:.0f}%
         positions_text = "\n".join(pos_lines) if pos_lines else "No hay posiciones"
 
         message = f"""
-⏰ *FIN DE SESIÓN - 11:30 AM EST*
+⏰ *FIN DE SESIÓN - 16:00 EST*
 
 *Posiciones abiertas:*
 {positions_text}

@@ -125,7 +125,7 @@ python test_telegram.py   # Test del bot de Telegram
 | 09:25 | Escaneo pre-market con sentimiento |
 | 09:45 | Cálculo del Opening Range |
 | 09:46 | Inicio monitoreo de breakouts |
-| 11:30 | Cierre de posiciones y resumen diario |
+| 16:00 | Cierre de posiciones y resumen diario (market close) |
 
 ## Arquitectura
 

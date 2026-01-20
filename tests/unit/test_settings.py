@@ -58,7 +58,7 @@ class TestTradingConfig:
         # Trading hours
         assert config.market_open == "09:30"
         assert config.orb_end == "09:45"
-        assert config.trading_end == "11:30"
+        assert config.trading_end == "16:00"
 
         # ORB settings
         assert config.orb_period_minutes == 15

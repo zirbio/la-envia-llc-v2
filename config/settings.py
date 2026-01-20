@@ -54,7 +54,7 @@ class TradingConfig:
     premarket_start: str = "06:00"
     market_open: str = "09:30"
     orb_end: str = "09:45"  # Opening Range period ends
-    trading_end: str = "11:30"  # Stop trading, close positions
+    trading_end: str = "16:00"  # Stop trading, close positions (market close)
 
     # Opening Range
     orb_period_minutes: int = 15

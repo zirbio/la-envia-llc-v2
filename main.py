@@ -126,10 +126,10 @@ class TradingBot:
             replace_existing=True
         )
 
-        # Close all positions at 11:30 AM EST
+        # Close all positions at 16:00 (market close) EST
         self.scheduler.add_job(
             self._end_session,
-            CronTrigger(hour=11, minute=30, timezone=EST),
+            CronTrigger(hour=16, minute=0, timezone=EST),
             id='end_session',
             replace_existing=True
         )
@@ -201,8 +201,8 @@ class TradingBot:
             try:
                 now = datetime.now(EST)
 
-                # Stop monitoring after 11:30 AM
-                if now.time() >= time(11, 30):
+                # Stop monitoring after 16:00 (market close)
+                if now.time() >= time(16, 0):
                     logger.info("Trading window closed")
                     break
 
@@ -331,12 +331,12 @@ class TradingBot:
         now = datetime.now(EST)
         current_time = now.time()
 
-        # Trading window: 9:30 AM - 11:30 AM EST
+        # Trading window: 9:30 AM - 16:00 EST (market close)
         market_open = time(9, 30)
         premarket_scan = time(9, 25)
         orb_ready = time(9, 45)
         monitor_start = time(9, 46)
-        session_end = time(11, 30)
+        session_end = time(16, 0)
 
         # Check if market is open today
         clock_info = order_executor.get_next_market_times()
@@ -349,7 +349,7 @@ class TradingBot:
 
         # Market is open, check where we are in the trading window
         if current_time >= session_end:
-            await telegram_bot.send_message("🤖 *Bot iniciado*\n⏰ Ventana de trading cerrada (después de 11:30 AM EST)\nEsperando mañana...")
+            await telegram_bot.send_message("🤖 *Bot iniciado*\n⏰ Ventana de trading cerrada (después de 16:00 EST)\nEsperando mañana...")
             logger.info("Trading window closed for today")
             return
 
