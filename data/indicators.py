@@ -166,7 +166,11 @@ def calculate_stochastic(
     lowest_low = df['low'].rolling(window=k_period).min()
     highest_high = df['high'].rolling(window=k_period).max()
 
-    stoch_k = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low)
+    # Avoid division by zero when highest_high == lowest_low
+    range_hl = highest_high - lowest_low
+    range_hl = range_hl.replace(0, np.nan)  # Replace 0 with NaN to avoid division by zero
+
+    stoch_k = 100 * (df['close'] - lowest_low) / range_hl
     stoch_d = stoch_k.rolling(window=d_period).mean()
 
     return stoch_k, stoch_d
@@ -185,11 +189,15 @@ def is_macd_bullish(macd: float, signal: float, histogram: float, prev_histogram
     Returns:
         True if bullish
     """
+    # Need previous histogram to confirm momentum direction
+    if prev_histogram is None:
+        return False
+
     # MACD above signal line
     above_signal = macd > signal
     # Histogram positive and growing
     histogram_positive = histogram > 0
-    histogram_growing = prev_histogram is None or histogram > prev_histogram
+    histogram_growing = histogram > prev_histogram
 
     return above_signal and histogram_positive and histogram_growing
 
@@ -207,9 +215,13 @@ def is_macd_bearish(macd: float, signal: float, histogram: float, prev_histogram
     Returns:
         True if bearish
     """
+    # Need previous histogram to confirm momentum direction
+    if prev_histogram is None:
+        return False
+
     below_signal = macd < signal
     histogram_negative = histogram < 0
-    histogram_falling = prev_histogram is None or histogram < prev_histogram
+    histogram_falling = histogram < prev_histogram
 
     return below_signal and histogram_negative and histogram_falling
 

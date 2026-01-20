@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import aiohttp
 from loguru import logger
 
+from config.settings import settings
+
 
 @dataclass
 class SentimentResult:
@@ -59,11 +61,8 @@ class SentimentAnalyzer:
         """
         self.finnhub_api_key = finnhub_api_key
         self.cache: dict[str, SentimentResult] = {}
-        self.cache_ttl = timedelta(minutes=30)  # Cache results for 30 min
-
-        # Rate limiting
-        self._last_request_time = 0
-        self._min_request_interval = 1.0  # 1 second between requests
+        # Cache TTL from settings
+        self.cache_ttl = timedelta(minutes=settings.sentiment.cache_minutes)
 
     async def get_sentiment(self, symbol: str) -> SentimentResult:
         """
@@ -112,7 +111,7 @@ class SentimentAnalyzer:
             try:
                 result = await self.get_sentiment(symbol)
                 results[symbol] = result
-                await asyncio.sleep(0.5)  # Rate limiting
+                await asyncio.sleep(1.0)  # Rate limiting (60 calls/min for Finnhub free tier)
             except Exception as e:
                 logger.error(f"Error getting sentiment for {symbol}: {e}")
                 # Return neutral sentiment on error

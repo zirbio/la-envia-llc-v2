@@ -200,29 +200,33 @@ class PremarketScanner:
         if self.sentiment_config.enabled:
             logger.info(f"Analyzing sentiment for {len(self.candidates)} candidates...")
 
-            candidate_symbols = [c.symbol for c in self.candidates]
-            sentiment_results = await sentiment_analyzer.get_batch_sentiment(candidate_symbols)
+            try:
+                candidate_symbols = [c.symbol for c in self.candidates]
+                sentiment_results = await sentiment_analyzer.get_batch_sentiment(candidate_symbols)
 
-            # Update candidates with sentiment
-            for candidate in self.candidates:
-                if candidate.symbol in sentiment_results:
-                    sent = sentiment_results[candidate.symbol]
-                    candidate.sentiment_score = sent.score
-                    candidate.sentiment_news_count = sent.news_count
+                # Update candidates with sentiment
+                for candidate in self.candidates:
+                    if candidate.symbol in sentiment_results:
+                        sent = sentiment_results[candidate.symbol]
+                        candidate.sentiment_score = sent.score
+                        candidate.sentiment_news_count = sent.news_count
 
-                    # Set label (in Spanish)
-                    if sent.score >= 0.3:
-                        candidate.sentiment_label = "Alcista"
-                    elif sent.score <= -0.3:
-                        candidate.sentiment_label = "Bajista"
-                    else:
-                        candidate.sentiment_label = "Neutral"
+                        # Set label (in Spanish) using settings thresholds
+                        if sent.score >= self.sentiment_config.max_score_short:
+                            candidate.sentiment_label = "Alcista"
+                        elif sent.score <= self.sentiment_config.min_score_long:
+                            candidate.sentiment_label = "Bajista"
+                        else:
+                            candidate.sentiment_label = "Neutral"
 
-                    # Boost/penalize score based on sentiment alignment with gap
-                    sentiment_boost = self._calculate_sentiment_boost(
-                        candidate.gap_percent, sent.score
-                    )
-                    candidate.score += sentiment_boost
+                        # Boost/penalize score based on sentiment alignment with gap
+                        sentiment_boost = self._calculate_sentiment_boost(
+                            candidate.gap_percent, sent.score
+                        )
+                        candidate.score += sentiment_boost
+            except Exception as e:
+                logger.error(f"Error in batch sentiment analysis: {e}")
+                # Continue with neutral sentiment for all candidates
 
         # Sort by score (highest first)
         self.candidates.sort(key=lambda x: x.score, reverse=True)

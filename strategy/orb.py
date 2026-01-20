@@ -253,7 +253,7 @@ class ORBStrategy:
             rel_volume >= self.config.min_relative_volume,  # Volume spike
             rsi < self.config.rsi_overbought,  # Not overbought
             macd_bullish,  # MACD confirmation
-            sentiment >= -0.3  # Not strongly negative sentiment
+            sentiment >= settings.sentiment.min_score_long  # Not strongly negative sentiment
         ]
 
         if all(conditions):
@@ -282,7 +282,7 @@ class ORBStrategy:
             rel_volume >= self.config.min_relative_volume,  # Volume spike
             rsi > self.config.rsi_oversold,  # Not oversold
             macd_bearish,  # MACD confirmation
-            sentiment <= 0.3  # Not strongly positive sentiment
+            sentiment <= settings.sentiment.max_score_short  # Not strongly positive sentiment
         ]
 
         if all(conditions):
