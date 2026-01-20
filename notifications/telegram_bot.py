@@ -30,6 +30,11 @@ class TradingTelegramBot:
         self.is_running = False
         self.is_paused = False
 
+        # Session close confirmation
+        self.pending_session_close = False
+        self.session_close_event: Optional[asyncio.Event] = None
+        self.session_close_confirmed = False
+
         # Callbacks for external handlers
         self.on_confirmation: Optional[Callable[[TradeSignal], Awaitable[None]]] = None
 
@@ -233,6 +238,60 @@ Win Rate: {win_rate:.0f}%
         """
         return await self.send_message(message.strip())
 
+    async def ask_session_close_confirmation(self, positions: list, total_pnl: float) -> bool:
+        """
+        Ask user for confirmation before closing session
+
+        Args:
+            positions: List of open positions
+            total_pnl: Current unrealized P/L
+
+        Returns:
+            True if user confirms, False otherwise
+        """
+        self.pending_session_close = True
+        self.session_close_event = asyncio.Event()
+        self.session_close_confirmed = False
+
+        emoji = "🟢" if total_pnl >= 0 else "🔴"
+        direction = "+" if total_pnl >= 0 else ""
+
+        # Build positions summary
+        pos_lines = []
+        for p in positions:
+            p_emoji = "🟢" if p.unrealized_pl >= 0 else "🔴"
+            p_dir = "+" if p.unrealized_pl >= 0 else ""
+            pos_lines.append(f"{p_emoji} {p.symbol}: {p_dir}${p.unrealized_pl:.2f}")
+
+        positions_text = "\n".join(pos_lines) if pos_lines else "No hay posiciones"
+
+        message = f"""
+⏰ *FIN DE SESIÓN - 11:30 AM EST*
+
+*Posiciones abiertas:*
+{positions_text}
+
+{emoji} *P/L Total:* {direction}${total_pnl:.2f}
+
+━━━━━━━━━━━━━━━━━━━━
+¿Cerrar todas las posiciones?
+
+Reply *SI* para cerrar
+Reply *NO* para mantener abiertas
+        """
+
+        await self.send_message(message.strip())
+
+        # Wait for response with timeout (5 minutes)
+        try:
+            await asyncio.wait_for(self.session_close_event.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            await self.send_message("⏰ Timeout - Cerrando posiciones automáticamente...")
+            self.session_close_confirmed = True
+
+        self.pending_session_close = False
+        return self.session_close_confirmed
+
     async def _handle_message(
         self,
         update: Update,
@@ -249,7 +308,19 @@ Win Rate: {win_rate:.0f}%
         if chat_id != self.chat_id:
             return
 
-        # Handle confirmation responses
+        # Handle session close confirmation first (priority)
+        if self.pending_session_close:
+            if text in ["SI", "SÍ", "YES", "Y", "OK"]:
+                self.session_close_confirmed = True
+                self.session_close_event.set()
+                return
+            elif text in ["NO", "N", "CANCEL"]:
+                self.session_close_confirmed = False
+                self.session_close_event.set()
+                await self.send_message("📌 Posiciones mantenidas abiertas\n⚠️ Recuerda cerrarlas manualmente con /close")
+                return
+
+        # Handle trade signal confirmation responses
         if text in ["SI", "SÍ", "YES", "Y", "OK"]:
             await self._handle_confirmation(True)
         elif text in ["NO", "N", "CANCEL"]:

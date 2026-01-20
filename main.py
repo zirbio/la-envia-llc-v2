@@ -61,7 +61,6 @@ class TradingBot:
             await telegram_bot.initialize()
             telegram_bot.on_confirmation = self._on_trade_confirmed
             asyncio.create_task(telegram_bot.start_polling())
-            await telegram_bot.send_message("🤖 *Bot iniciado*\nEsperando apertura del mercado...")
 
         # Schedule daily tasks
         self._schedule_tasks()
@@ -74,6 +73,9 @@ class TradingBot:
         logger.info(f"Paper Trading: {settings.alpaca.paper}")
         logger.info(f"Max Capital: ${settings.trading.max_capital:,}")
         logger.info(f"Risk per trade: {settings.trading.risk_per_trade * 100}%")
+
+        # Check if we're already in trading window
+        await self._check_immediate_start()
 
         # Keep running
         try:
@@ -282,13 +284,24 @@ class TradingBot:
         if self.monitoring_task:
             self.monitoring_task.cancel()
 
-        # Close all positions
+        # Get positions and P/L
         positions = order_executor.get_positions()
         total_pnl = sum(p.unrealized_pl for p in positions)
 
         if positions:
-            order_executor.close_all_positions()
-            await telegram_bot.send_message("🔔 *Sesión terminada* - Posiciones cerradas")
+            # Ask for confirmation before closing
+            should_close = await telegram_bot.ask_session_close_confirmation(positions, total_pnl)
+
+            if should_close:
+                order_executor.close_all_positions()
+                await telegram_bot.send_message("✅ *Posiciones cerradas*")
+                logger.info("User confirmed - positions closed")
+            else:
+                await telegram_bot.send_message("⚠️ *Posiciones mantenidas*\nUsa /close para cerrar manualmente")
+                logger.info("User declined - positions kept open")
+                return  # Don't send daily summary if positions still open
+        else:
+            await telegram_bot.send_message("🔔 *Sesión terminada* - No hay posiciones abiertas")
 
         # Calculate daily stats
         winners = sum(1 for t in self.trades_today if t.get('pnl', 0) > 0)
@@ -308,6 +321,70 @@ class TradingBot:
         self.watchlist.clear()
         self.trades_today.clear()
         logger.info("Daily reset complete")
+
+    async def _check_immediate_start(self):
+        """Check if we're already in trading window and start immediately"""
+        now = datetime.now(EST)
+        current_time = now.time()
+
+        # Trading window: 9:30 AM - 11:30 AM EST
+        market_open = time(9, 30)
+        premarket_scan = time(9, 25)
+        orb_ready = time(9, 45)
+        monitor_start = time(9, 46)
+        session_end = time(11, 30)
+
+        # Check if market is open today
+        clock_info = order_executor.get_next_market_times()
+        is_market_open = clock_info.get('is_open', False)
+
+        if not is_market_open:
+            await telegram_bot.send_message("🤖 *Bot iniciado*\n🔴 Mercado cerrado\nEsperando próxima apertura...")
+            logger.info("Market is closed, waiting for scheduled times")
+            return
+
+        # Market is open, check where we are in the trading window
+        if current_time >= session_end:
+            await telegram_bot.send_message("🤖 *Bot iniciado*\n⏰ Ventana de trading cerrada (después de 11:30 AM EST)\nEsperando mañana...")
+            logger.info("Trading window closed for today")
+            return
+
+        if current_time >= monitor_start:
+            # We're in the monitoring window - run full startup sequence
+            await telegram_bot.send_message(
+                "🤖 *Bot iniciado*\n"
+                "🟢 *Mercado ABIERTO*\n"
+                "⚡ Iniciando secuencia completa..."
+            )
+            logger.info("Market open - running immediate startup sequence")
+
+            # Run premarket scan
+            await self._run_premarket_scan()
+
+            # Calculate ORBs
+            await self._calculate_opening_ranges()
+
+            # Start monitoring
+            await self._start_monitoring()
+
+        elif current_time >= premarket_scan:
+            # Between 9:25 and 9:46 - run scan, will catch up to schedule
+            await telegram_bot.send_message(
+                "🤖 *Bot iniciado*\n"
+                "🟢 *Mercado ABIERTO*\n"
+                "📊 Ejecutando scanner..."
+            )
+            logger.info("Market open - running premarket scan")
+            await self._run_premarket_scan()
+
+        else:
+            # Before 9:25 AM - just wait for scheduled tasks
+            await telegram_bot.send_message(
+                "🤖 *Bot iniciado*\n"
+                "🟡 Mercado abrirá pronto\n"
+                f"Scanner a las 9:25 AM EST"
+            )
+            logger.info("Waiting for market open")
 
 
 async def main():
