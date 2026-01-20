@@ -145,12 +145,12 @@ class TradingBot:
         logger.info("Scheduled tasks configured")
 
     async def _run_premarket_scan(self):
-        """Run pre-market scanner"""
-        logger.info("Running pre-market scan...")
+        """Run pre-market scanner with sentiment analysis"""
+        logger.info("Running pre-market scan with sentiment analysis...")
 
         try:
-            # Scan for candidates
-            candidates = premarket_scanner.scan_watchlist(SCAN_UNIVERSE)
+            # Scan for candidates with sentiment analysis
+            candidates = await premarket_scanner.scan_watchlist_with_sentiment(SCAN_UNIVERSE)
 
             if not candidates:
                 logger.warning("No candidates found in pre-market scan")
@@ -159,6 +159,10 @@ class TradingBot:
 
             # Update watchlist
             self.watchlist = [c.symbol for c in candidates]
+
+            # Update strategy sentiment cache
+            for c in candidates:
+                orb_strategy.update_sentiment(c.symbol, c.sentiment_score)
 
             # Send watchlist to Telegram
             message = premarket_scanner.format_watchlist_message()

@@ -27,7 +27,16 @@ class TelegramConfig:
     """Telegram bot configuration"""
     bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
-    enabled: bool = True
+
+
+@dataclass
+class SentimentConfig:
+    """Sentiment analysis configuration"""
+    finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")
+    enabled: bool = os.getenv("SENTIMENT_ENABLED", "true").lower() == "true"
+    min_score_long: float = -0.3  # Minimum sentiment for long trades
+    max_score_short: float = 0.3  # Maximum sentiment for short trades
+    cache_minutes: int = 30
 
 
 @dataclass
@@ -73,13 +82,15 @@ class Settings:
     alpaca: AlpacaConfig
     telegram: TelegramConfig
     trading: TradingConfig
+    sentiment: SentimentConfig
 
     @classmethod
     def load(cls) -> "Settings":
         return cls(
             alpaca=AlpacaConfig(),
             telegram=TelegramConfig(),
-            trading=TradingConfig()
+            trading=TradingConfig(),
+            sentiment=SentimentConfig()
         )
 
 

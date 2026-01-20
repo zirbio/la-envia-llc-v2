@@ -1,12 +1,14 @@
 """
 Pre-market scanner to find trading candidates
 """
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import Optional
 from loguru import logger
 
 from config.settings import settings
 from data.market_data import market_data
+from data.sentiment import sentiment_analyzer, SentimentResult
 
 
 @dataclass
@@ -19,12 +21,16 @@ class ScanResult:
     premarket_volume: int
     avg_daily_volume: int
     score: float = 0.0
+    sentiment_score: float = 0.0
+    sentiment_label: str = "Neutral"  # Alcista, Bajista, Neutral
+    sentiment_news_count: int = 0
 
     def __str__(self) -> str:
         direction = "+" if self.gap_percent > 0 else ""
         return (
             f"{self.symbol}: {direction}{self.gap_percent:.1f}% | "
-            f"Vol: {self.premarket_volume:,} | Score: {self.score:.0f}"
+            f"Vol: {self.premarket_volume:,} | Score: {self.score:.0f} | "
+            f"Sent: {self.sentiment_label}"
         )
 
 
@@ -33,7 +39,15 @@ class PremarketScanner:
 
     def __init__(self):
         self.config = settings.trading
+        self.sentiment_config = settings.sentiment
         self.candidates: list[ScanResult] = []
+
+        # Configure sentiment analyzer with API key
+        if self.sentiment_config.finnhub_api_key:
+            sentiment_analyzer.finnhub_api_key = self.sentiment_config.finnhub_api_key
+            logger.info("Sentiment analysis enabled with Finnhub API")
+        else:
+            logger.warning("Finnhub API key not configured - sentiment analysis limited")
 
     def scan_symbol(self, symbol: str) -> Optional[ScanResult]:
         """
@@ -158,6 +172,90 @@ class PremarketScanner:
         logger.info(f"Found {len(self.candidates)} candidates")
         return self.candidates
 
+    async def scan_watchlist_with_sentiment(self, symbols: list[str]) -> list[ScanResult]:
+        """
+        Scan symbols and add sentiment analysis (async version)
+
+        Args:
+            symbols: List of symbols to scan
+
+        Returns:
+            List of ScanResult with sentiment scores, sorted by score
+        """
+        # First do the regular scan
+        self.candidates = []
+
+        logger.info(f"Scanning {len(symbols)} symbols for pre-market gaps...")
+
+        for symbol in symbols:
+            result = self.scan_symbol(symbol)
+            if result:
+                self.candidates.append(result)
+
+        if not self.candidates:
+            logger.info("No candidates found")
+            return self.candidates
+
+        # Add sentiment analysis if enabled
+        if self.sentiment_config.enabled:
+            logger.info(f"Analyzing sentiment for {len(self.candidates)} candidates...")
+
+            candidate_symbols = [c.symbol for c in self.candidates]
+            sentiment_results = await sentiment_analyzer.get_batch_sentiment(candidate_symbols)
+
+            # Update candidates with sentiment
+            for candidate in self.candidates:
+                if candidate.symbol in sentiment_results:
+                    sent = sentiment_results[candidate.symbol]
+                    candidate.sentiment_score = sent.score
+                    candidate.sentiment_news_count = sent.news_count
+
+                    # Set label (in Spanish)
+                    if sent.score >= 0.3:
+                        candidate.sentiment_label = "Alcista"
+                    elif sent.score <= -0.3:
+                        candidate.sentiment_label = "Bajista"
+                    else:
+                        candidate.sentiment_label = "Neutral"
+
+                    # Boost/penalize score based on sentiment alignment with gap
+                    sentiment_boost = self._calculate_sentiment_boost(
+                        candidate.gap_percent, sent.score
+                    )
+                    candidate.score += sentiment_boost
+
+        # Sort by score (highest first)
+        self.candidates.sort(key=lambda x: x.score, reverse=True)
+
+        # Limit to max watchlist size
+        self.candidates = self.candidates[:self.config.max_watchlist_size]
+
+        logger.info(f"Found {len(self.candidates)} candidates with sentiment")
+        return self.candidates
+
+    def _calculate_sentiment_boost(self, gap_percent: float, sentiment_score: float) -> float:
+        """
+        Calculate score boost/penalty based on sentiment alignment
+
+        Args:
+            gap_percent: Gap percentage (+ for gap up, - for gap down)
+            sentiment_score: Sentiment score (-1 to 1)
+
+        Returns:
+            Score adjustment (positive = boost, negative = penalty)
+        """
+        # Gap up + bullish sentiment = good alignment (boost)
+        # Gap up + bearish sentiment = bad alignment (penalty)
+        # Gap down + bearish sentiment = good alignment (boost)
+        # Gap down + bullish sentiment = bad alignment (penalty)
+
+        if gap_percent > 0:
+            # Gap up - want bullish sentiment
+            return sentiment_score * 10  # Max +/- 10 points
+        else:
+            # Gap down - want bearish sentiment
+            return -sentiment_score * 10  # Inverted: bearish = boost
+
     def get_top_candidates(self, n: int = 5) -> list[ScanResult]:
         """Get top N candidates by score"""
         return self.candidates[:n]
@@ -181,9 +279,18 @@ class PremarketScanner:
             emoji = "🟢" if c.gap_percent > 0 else "🔴"
             direction = "+" if c.gap_percent > 0 else ""
 
+            # Sentiment emoji
+            if c.sentiment_score >= 0.3:
+                sent_emoji = "📈"
+            elif c.sentiment_score <= -0.3:
+                sent_emoji = "📉"
+            else:
+                sent_emoji = "➖"
+
             lines.append(
                 f"{emoji} *{c.symbol}* {direction}{c.gap_percent:.1f}%\n"
-                f"   Vol: {c.premarket_volume:,} | Score: {c.score:.0f}"
+                f"   Vol: {c.premarket_volume:,} | Score: {c.score:.0f}\n"
+                f"   {sent_emoji} Sentimiento: {c.sentiment_label} ({c.sentiment_score:+.2f})"
             )
 
         return "\n".join(lines)
