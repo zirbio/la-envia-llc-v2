@@ -87,6 +87,22 @@ class TestTradingConfig:
         assert config.risk_per_trade == 0.01
         assert config.max_trades_per_day == 5
 
+    def test_trading_config_trading_end_is_16_00(self):
+        """TradingConfig.trading_end should be '16:00' (market close).
+
+        This is a critical test to ensure the trading session ends at
+        market close (16:00 EST) instead of an earlier time like 11:30.
+        """
+        config = TradingConfig()
+
+        # trading_end must be exactly "16:00" - US market close time
+        assert config.trading_end == "16:00", \
+            f"trading_end should be '16:00' (market close), got '{config.trading_end}'"
+
+        # Ensure it's not the old incorrect value
+        assert config.trading_end != "11:30", \
+            "trading_end should NOT be '11:30' (old incorrect value)"
+
 
 # ============================================================================
 # SentimentConfig Tests
