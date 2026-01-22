@@ -13,7 +13,7 @@ from data.market_data import market_data
 from data.indicators import (
     calculate_rsi, calculate_vwap, detect_volume_spike,
     calculate_macd, is_macd_bullish, is_macd_bearish,
-    IndicatorCalculator
+    calculate_atr, IndicatorCalculator
 )
 
 
@@ -61,6 +61,8 @@ class TradeSignal:
     macd_histogram: float = 0.0
     # Sentiment score (-1 to 1)
     sentiment_score: float = 0.0
+    # Phase 4: Signal quality score (0-100)
+    signal_score: float = 0.0
 
     def __str__(self) -> str:
         emoji = "🟢" if self.signal_type == SignalType.LONG else "🔴"
@@ -73,6 +75,7 @@ class TradeSignal:
             f"Target: ${self.take_profit:.2f}\n"
             f"Size: {self.position_size} shares\n"
             f"Risk: ${self.risk_amount:.2f}\n"
+            f"Score: {self.signal_score:.0f}/100\n"
             f"MACD: {macd_status}"
         )
 
@@ -114,6 +117,9 @@ class ORBStrategy:
         self.avg_win: float = 0.02  # Default 2%
         self.avg_loss: float = 0.01  # Default 1%
         self.kelly_fraction: float = 0.5  # Half-Kelly for safety
+        # Phase 6: Risk management tracking
+        self.daily_pnl: float = 0.0  # Tracks P/L for circuit breaker
+        self.consecutive_losses: int = 0  # Tracks consecutive losses for cooldown
 
     def calculate_opening_range(self, symbol: str) -> Optional[OpeningRange]:
         """
@@ -139,11 +145,32 @@ class ORBStrategy:
             # Get first N minutes of bars
             orb_bars = bars.head(self.config.orb_period_minutes)
 
+            high = orb_bars['high'].max()
+            low = orb_bars['low'].min()
+            range_size = high - low
+
+            # Phase 3: Filter by ORB range percentage
+            range_pct = (range_size / low) * 100
+
+            if range_pct < self.config.min_orb_range_pct:
+                logger.info(
+                    f"{symbol}: ORB range {range_pct:.2f}% too narrow "
+                    f"(min {self.config.min_orb_range_pct}%), skipping"
+                )
+                return None
+
+            if range_pct > self.config.max_orb_range_pct:
+                logger.info(
+                    f"{symbol}: ORB range {range_pct:.2f}% too wide "
+                    f"(max {self.config.max_orb_range_pct}%), skipping"
+                )
+                return None
+
             orb = OpeningRange(
                 symbol=symbol,
-                high=orb_bars['high'].max(),
-                low=orb_bars['low'].min(),
-                range_size=orb_bars['high'].max() - orb_bars['low'].min(),
+                high=high,
+                low=low,
+                range_size=range_size,
                 vwap=calculate_vwap(orb_bars).iloc[-1],
                 timestamp=datetime.now()
             )
@@ -151,7 +178,7 @@ class ORBStrategy:
             self.opening_ranges[symbol] = orb
             logger.info(
                 f"ORB for {symbol}: High=${orb.high:.2f}, "
-                f"Low=${orb.low:.2f}, Range=${orb.range_size:.2f}"
+                f"Low=${orb.low:.2f}, Range=${orb.range_size:.2f} ({range_pct:.2f}%)"
             )
 
             return orb
@@ -191,6 +218,27 @@ class ORBStrategy:
             logger.debug("Daily trade limit reached")
             return None
 
+        # Phase 6: Daily loss limit circuit breaker
+        if self.daily_pnl <= -self.config.max_daily_loss:
+            logger.warning(f"Daily loss limit hit: ${self.daily_pnl:.2f}, no new trades")
+            return None
+
+        # Phase 6: Consecutive loss cooldown
+        if self.consecutive_losses >= self.config.max_consecutive_losses:
+            logger.info(f"Cooldown: {self.consecutive_losses} consecutive losses, pausing trades")
+            return None
+
+        # Phase 6: Trading window restriction
+        try:
+            latest_time_str = self.config.latest_trade_time
+            latest_hour, latest_minute = map(int, latest_time_str.split(':'))
+            latest_time = time(latest_hour, latest_minute)
+            if datetime.now().time() > latest_time:
+                logger.debug(f"Past trading window ({latest_time_str}), no new entries")
+                return None
+        except (ValueError, AttributeError):
+            pass  # If parsing fails, ignore this check
+
         # Get current market data with indicators
         bars = market_data.get_bars(symbol, limit=50)
         if bars.empty:
@@ -203,7 +251,19 @@ class ORBStrategy:
 
         current_vwap = indicators.get('vwap', 0)
         current_rsi = indicators.get('rsi', 50)
-        relative_volume = current_volume / max(avg_volume / 390, 1)  # Per minute avg
+
+        # Phase 2: Use time-adjusted RVOL if volume profile is available
+        current_minute = market_data.get_current_minute_index()
+        cumulative_volume = market_data.get_cumulative_volume_today(symbol)
+
+        if symbol in market_data.volume_profiles and market_data.volume_profiles[symbol]:
+            # Use time-adjusted RVOL (more accurate during first hour)
+            relative_volume = market_data.calculate_time_adjusted_rvol(
+                symbol, current_minute, cumulative_volume
+            )
+        else:
+            # Fallback to simple RVOL calculation
+            relative_volume = current_volume / max(avg_volume / 390, 1)  # Per minute avg
 
         # MACD values
         macd = indicators.get('macd', 0)
@@ -214,25 +274,37 @@ class ORBStrategy:
         # Get sentiment score if available
         sentiment = self.sentiment_cache.get(symbol, 0.0)
 
-        # Check for LONG breakout (with MACD confirmation)
-        macd_bullish = is_macd_bullish(macd, macd_signal, macd_histogram, prev_histogram)
-        if self._check_long_conditions(
-            current_price, orb, current_vwap, current_rsi, relative_volume, macd_bullish, sentiment
-        ):
-            return self._create_long_signal(
-                symbol, current_price, orb, current_vwap, current_rsi, relative_volume,
-                macd, macd_signal, macd_histogram, sentiment
-            )
+        # Get last completed candle close for confirmation (Phase 1)
+        # bars.iloc[-1] is current forming candle, bars.iloc[-2] is last completed
+        last_candle_close = None
+        if len(bars) >= 2:
+            last_candle_close = float(bars['close'].iloc[-2])
 
-        # Check for SHORT breakout (with MACD confirmation)
-        macd_bearish = is_macd_bearish(macd, macd_signal, macd_histogram, prev_histogram)
-        if self._check_short_conditions(
-            current_price, orb, current_vwap, current_rsi, relative_volume, macd_bearish, sentiment
-        ):
-            return self._create_short_signal(
-                symbol, current_price, orb, current_vwap, current_rsi, relative_volume,
-                macd, macd_signal, macd_histogram, sentiment
-            )
+        # Phase 4: Use soft scoring system instead of hard gates
+        result = self._check_breakout_with_scoring(
+            symbol=symbol,
+            price=current_price,
+            orb=orb,
+            vwap=current_vwap,
+            rsi=current_rsi,
+            rel_volume=relative_volume,
+            macd_histogram=macd_histogram,
+            sentiment=sentiment,
+            last_candle_close=last_candle_close
+        )
+
+        if result is not None:
+            direction, score = result
+            if direction == 'LONG':
+                return self._create_long_signal(
+                    symbol, current_price, orb, current_vwap, current_rsi, relative_volume,
+                    macd, macd_signal, macd_histogram, sentiment, score
+                )
+            else:  # SHORT
+                return self._create_short_signal(
+                    symbol, current_price, orb, current_vwap, current_rsi, relative_volume,
+                    macd, macd_signal, macd_histogram, sentiment, score
+                )
 
         return None
 
@@ -244,11 +316,21 @@ class ORBStrategy:
         rsi: float,
         rel_volume: float,
         macd_bullish: bool = True,
-        sentiment: float = 0.0
+        sentiment: float = 0.0,
+        last_candle_close: Optional[float] = None
     ) -> bool:
         """Check if all LONG conditions are met (including MACD and sentiment)"""
-        # Check each condition individually for logging
-        c1 = price > orb.high
+        # Apply breakout buffer (Phase 1)
+        buffer = self.config.breakout_buffer_pct
+        breakout_level = orb.high * (1 + buffer)
+
+        # Check breakout with buffer
+        c1 = price > breakout_level
+
+        # If require_candle_close is enabled, verify last completed candle closed above level
+        if self.config.require_candle_close and last_candle_close is not None:
+            c1 = c1 and last_candle_close > breakout_level
+
         c2 = price > vwap
         c3 = rel_volume >= self.config.min_relative_volume
         c4 = rsi < self.config.rsi_overbought
@@ -258,8 +340,9 @@ class ORBStrategy:
         conditions = [c1, c2, c3, c4, c5, c6]
 
         # Log diagnostic info for this symbol
+        close_status = f"close={last_candle_close:.2f}" if last_candle_close else "no_close"
         status = (
-            f"{'✓' if c1 else '✗'} price>${'ORB' if c1 else f'ORB({orb.high:.2f})'} "
+            f"{'✓' if c1 else '✗'} price>${'ORB+buf' if c1 else f'ORB({breakout_level:.2f})'} "
             f"{'✓' if c2 else '✗'} VWAP "
             f"{'✓' if c3 else '✗'} vol({rel_volume:.1f}x) "
             f"{'✓' if c4 else '✗'} RSI({rsi:.0f}) "
@@ -268,11 +351,11 @@ class ORBStrategy:
         )
 
         if any([c1, c2]):  # Only log if price is near breakout levels
-            logger.info(f"LONG {orb.symbol}: ${price:.2f} | {status}")
+            logger.info(f"LONG {orb.symbol}: ${price:.2f} [{close_status}] | {status}")
 
         if all(conditions):
             logger.info(
-                f"🟢 LONG SIGNAL {orb.symbol}: price={price:.2f} > ORB={orb.high:.2f}, "
+                f"🟢 LONG SIGNAL {orb.symbol}: price={price:.2f} > ORB+buf={breakout_level:.2f}, "
                 f"VWAP={vwap:.2f}, vol={rel_volume:.1f}x, RSI={rsi:.0f}, sent={sentiment:.2f}"
             )
 
@@ -286,11 +369,21 @@ class ORBStrategy:
         rsi: float,
         rel_volume: float,
         macd_bearish: bool = True,
-        sentiment: float = 0.0
+        sentiment: float = 0.0,
+        last_candle_close: Optional[float] = None
     ) -> bool:
         """Check if all SHORT conditions are met (including MACD and sentiment)"""
-        # Check each condition individually for logging
-        c1 = price < orb.low
+        # Apply breakout buffer (Phase 1)
+        buffer = self.config.breakout_buffer_pct
+        breakout_level = orb.low * (1 - buffer)
+
+        # Check breakout with buffer
+        c1 = price < breakout_level
+
+        # If require_candle_close is enabled, verify last completed candle closed below level
+        if self.config.require_candle_close and last_candle_close is not None:
+            c1 = c1 and last_candle_close < breakout_level
+
         c2 = price < vwap
         c3 = rel_volume >= self.config.min_relative_volume
         c4 = rsi > self.config.rsi_oversold
@@ -300,8 +393,9 @@ class ORBStrategy:
         conditions = [c1, c2, c3, c4, c5, c6]
 
         # Log diagnostic info for this symbol
+        close_status = f"close={last_candle_close:.2f}" if last_candle_close else "no_close"
         status = (
-            f"{'✓' if c1 else '✗'} price<{'ORB' if c1 else f'ORB({orb.low:.2f})'} "
+            f"{'✓' if c1 else '✗'} price<{'ORB-buf' if c1 else f'ORB({breakout_level:.2f})'} "
             f"{'✓' if c2 else '✗'} VWAP "
             f"{'✓' if c3 else '✗'} vol({rel_volume:.1f}x) "
             f"{'✓' if c4 else '✗'} RSI({rsi:.0f}) "
@@ -310,15 +404,228 @@ class ORBStrategy:
         )
 
         if any([c1, c2]):  # Only log if price is near breakout levels
-            logger.info(f"SHORT {orb.symbol}: ${price:.2f} | {status}")
+            logger.info(f"SHORT {orb.symbol}: ${price:.2f} [{close_status}] | {status}")
 
         if all(conditions):
             logger.info(
-                f"🔴 SHORT SIGNAL {orb.symbol}: price={price:.2f} < ORB={orb.low:.2f}, "
+                f"🔴 SHORT SIGNAL {orb.symbol}: price={price:.2f} < ORB-buf={breakout_level:.2f}, "
                 f"VWAP={vwap:.2f}, vol={rel_volume:.1f}x, RSI={rsi:.0f}, sent={sentiment:.2f}"
             )
 
         return all(conditions)
+
+    def _calculate_signal_score(
+        self,
+        price: float,
+        orb: OpeningRange,
+        vwap: float,
+        rsi: float,
+        rel_volume: float,
+        macd_histogram: float,
+        sentiment: float,
+        direction: str,
+        last_candle_close: Optional[float] = None
+    ) -> float:
+        """
+        Calculate signal quality score (0-100). Only trade if score >= min_signal_score.
+
+        Scoring breakdown:
+        - Breakout strength: 0-25 pts (how far past ORB level)
+        - VWAP alignment: 0-15 pts (distance from VWAP in right direction)
+        - Volume: 0-20 pts (relative volume strength)
+        - RSI: 0-15 pts (favor middle zone, penalize extremes)
+        - MACD: 0-15 pts (histogram strength in right direction)
+        - Sentiment: 0-10 pts (alignment with trade direction)
+        """
+        score = 0.0
+        buffer = self.config.breakout_buffer_pct
+
+        # BREAKOUT STRENGTH (0-25 pts)
+        if direction == 'LONG':
+            breakout_level = orb.high * (1 + buffer)
+            if price > breakout_level:
+                breakout_pct = (price - orb.high) / orb.high * 100
+                score += min(breakout_pct * 50, 25)  # 0.5% breakout = 25 pts
+        else:  # SHORT
+            breakout_level = orb.low * (1 - buffer)
+            if price < breakout_level:
+                breakout_pct = (orb.low - price) / orb.low * 100
+                score += min(breakout_pct * 50, 25)
+
+        # VWAP ALIGNMENT (0-15 pts)
+        vwap_dist_pct = abs(price - vwap) / vwap * 100 if vwap > 0 else 0
+        if (direction == 'LONG' and price > vwap) or (direction == 'SHORT' and price < vwap):
+            score += min(vwap_dist_pct * 15, 15)
+
+        # VOLUME (0-20 pts)
+        if rel_volume >= 2.5:
+            score += 20
+        elif rel_volume >= 2.0:
+            score += 15
+        elif rel_volume >= 1.5:
+            score += 10
+        elif rel_volume >= 1.2:
+            score += 5
+
+        # RSI (0-15 pts) - reward middle zone, penalize extremes
+        if direction == 'LONG':
+            if 40 <= rsi <= 60:
+                score += 15  # Sweet spot
+            elif 30 <= rsi <= 70:
+                score += 10  # Acceptable
+            elif rsi < 30:
+                score += 5   # Oversold can bounce
+            # rsi > 70: 0 pts (overbought)
+        else:  # SHORT
+            if 40 <= rsi <= 60:
+                score += 15  # Sweet spot
+            elif 30 <= rsi <= 70:
+                score += 10  # Acceptable
+            elif rsi > 70:
+                score += 5   # Overbought can drop
+            # rsi < 30: 0 pts (oversold)
+
+        # MACD (0-15 pts)
+        if direction == 'LONG' and macd_histogram > 0:
+            score += min(abs(macd_histogram) * 100, 15)
+        elif direction == 'SHORT' and macd_histogram < 0:
+            score += min(abs(macd_histogram) * 100, 15)
+
+        # SENTIMENT (0-10 pts)
+        if direction == 'LONG':
+            # sentiment ranges from -1 to +1, convert to 0-10 pts
+            score += max(0, min((sentiment + 1) * 5, 10))
+        else:  # SHORT
+            # Negative sentiment is good for shorts
+            score += max(0, min((1 - sentiment) * 5, 10))
+
+        return score
+
+    def _check_breakout_with_scoring(
+        self,
+        symbol: str,
+        price: float,
+        orb: OpeningRange,
+        vwap: float,
+        rsi: float,
+        rel_volume: float,
+        macd_histogram: float,
+        sentiment: float,
+        last_candle_close: Optional[float] = None
+    ) -> Optional[tuple[str, float]]:
+        """
+        Check for breakout using soft scoring system (Phase 4).
+
+        Returns:
+            Tuple of (direction, score) if breakout detected, None otherwise
+        """
+        buffer = self.config.breakout_buffer_pct
+
+        # HARD REQUIREMENTS (must pass)
+        # 1. Minimum volume floor
+        if rel_volume < 1.2:
+            return None
+
+        # Check LONG breakout
+        long_breakout_level = orb.high * (1 + buffer)
+        long_breakout = price > long_breakout_level
+
+        # If require_candle_close, also check last completed candle
+        if self.config.require_candle_close and last_candle_close is not None:
+            long_breakout = long_breakout and last_candle_close > long_breakout_level
+
+        # Check SHORT breakout
+        short_breakout_level = orb.low * (1 - buffer)
+        short_breakout = price < short_breakout_level
+
+        if self.config.require_candle_close and last_candle_close is not None:
+            short_breakout = short_breakout and last_candle_close < short_breakout_level
+
+        # No breakout detected
+        if not long_breakout and not short_breakout:
+            return None
+
+        # Calculate scores for the valid direction(s)
+        if long_breakout:
+            long_score = self._calculate_signal_score(
+                price, orb, vwap, rsi, rel_volume, macd_histogram, sentiment, 'LONG', last_candle_close
+            )
+            if long_score >= self.config.min_signal_score:
+                logger.info(
+                    f"🟢 LONG {symbol}: score={long_score:.0f}/100, "
+                    f"price=${price:.2f} > ORB+buf=${long_breakout_level:.2f}, "
+                    f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
+                )
+                return ('LONG', long_score)
+            else:
+                logger.debug(f"LONG {symbol}: score {long_score:.0f} below threshold {self.config.min_signal_score}")
+
+        if short_breakout:
+            short_score = self._calculate_signal_score(
+                price, orb, vwap, rsi, rel_volume, macd_histogram, sentiment, 'SHORT', last_candle_close
+            )
+            if short_score >= self.config.min_signal_score:
+                logger.info(
+                    f"🔴 SHORT {symbol}: score={short_score:.0f}/100, "
+                    f"price=${price:.2f} < ORB-buf=${short_breakout_level:.2f}, "
+                    f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
+                )
+                return ('SHORT', short_score)
+            else:
+                logger.debug(f"SHORT {symbol}: score {short_score:.0f} below threshold {self.config.min_signal_score}")
+
+        return None
+
+    def _calculate_hybrid_stop(
+        self,
+        symbol: str,
+        entry_price: float,
+        orb: OpeningRange,
+        direction: str
+    ) -> float:
+        """
+        Phase 5: Calculate hybrid stop using tighter of ORB opposite or ATR-based.
+
+        Args:
+            symbol: Stock symbol
+            entry_price: Entry price
+            orb: Opening Range data
+            direction: 'LONG' or 'SHORT'
+
+        Returns:
+            Stop loss price
+        """
+        # Get ATR for the symbol
+        bars = market_data.get_bars(symbol, limit=20)
+        if bars.empty or len(bars) < 14:
+            # Fallback to ORB-based stop if no ATR data
+            return orb.low if direction == 'LONG' else orb.high
+
+        atr_series = calculate_atr(bars)
+        atr = float(atr_series.iloc[-1]) if not atr_series.empty else 0
+
+        atr_multiplier = self.config.stop_atr_multiplier
+
+        if direction == 'LONG':
+            orb_stop = orb.low
+            atr_stop = entry_price - (atr * atr_multiplier)
+            # Use the tighter (higher) stop for longs
+            stop_loss = max(orb_stop, atr_stop)
+            logger.debug(
+                f"{symbol} LONG stop: ORB=${orb_stop:.2f}, ATR=${atr_stop:.2f}, "
+                f"using ${stop_loss:.2f} (tighter)"
+            )
+        else:  # SHORT
+            orb_stop = orb.high
+            atr_stop = entry_price + (atr * atr_multiplier)
+            # Use the tighter (lower) stop for shorts
+            stop_loss = min(orb_stop, atr_stop)
+            logger.debug(
+                f"{symbol} SHORT stop: ORB=${orb_stop:.2f}, ATR=${atr_stop:.2f}, "
+                f"using ${stop_loss:.2f} (tighter)"
+            )
+
+        return stop_loss
 
     def _create_long_signal(
         self,
@@ -331,10 +638,12 @@ class ORBStrategy:
         macd: float = 0.0,
         macd_signal: float = 0.0,
         macd_histogram: float = 0.0,
-        sentiment: float = 0.0
+        sentiment: float = 0.0,
+        signal_score: float = 0.0
     ) -> TradeSignal:
         """Create a LONG trade signal"""
-        stop_loss = orb.low
+        # Phase 5: Use hybrid stop (tighter of ORB or ATR-based)
+        stop_loss = self._calculate_hybrid_stop(symbol, entry_price, orb, 'LONG')
         risk_per_share = entry_price - stop_loss
         take_profit = entry_price + (risk_per_share * self.config.reward_risk_ratio)
 
@@ -359,7 +668,8 @@ class ORBStrategy:
             macd=macd,
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
-            sentiment_score=sentiment
+            sentiment_score=sentiment,
+            signal_score=signal_score
         )
 
         self.signals_today.append(signal)
@@ -378,10 +688,12 @@ class ORBStrategy:
         macd: float = 0.0,
         macd_signal: float = 0.0,
         macd_histogram: float = 0.0,
-        sentiment: float = 0.0
+        sentiment: float = 0.0,
+        signal_score: float = 0.0
     ) -> TradeSignal:
         """Create a SHORT trade signal"""
-        stop_loss = orb.high
+        # Phase 5: Use hybrid stop (tighter of ORB or ATR-based)
+        stop_loss = self._calculate_hybrid_stop(symbol, entry_price, orb, 'SHORT')
         risk_per_share = stop_loss - entry_price
         take_profit = entry_price - (risk_per_share * self.config.reward_risk_ratio)
 
@@ -406,7 +718,8 @@ class ORBStrategy:
             macd=macd,
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
-            sentiment_score=sentiment
+            sentiment_score=sentiment,
+            signal_score=signal_score
         )
 
         self.signals_today.append(signal)
@@ -544,9 +857,19 @@ class ORBStrategy:
         if len(self.trade_history) > 50:
             self.trade_history = self.trade_history[-50:]
 
+        # Phase 6: Update daily P/L tracking
+        self.daily_pnl += pnl
+
+        # Phase 6: Track consecutive losses
+        if result.won:
+            self.consecutive_losses = 0  # Reset on win
+        else:
+            self.consecutive_losses += 1
+
         logger.info(
             f"Trade recorded: {symbol} {'WIN' if result.won else 'LOSS'} "
-            f"PnL: {pnl_pct*100:.2f}% | Win rate: {self.win_rate:.1%}"
+            f"PnL: {pnl_pct*100:.2f}% | Win rate: {self.win_rate:.1%} | "
+            f"Daily P/L: ${self.daily_pnl:.2f} | Consec losses: {self.consecutive_losses}"
         )
 
     def update_sentiment(self, symbol: str, sentiment: float):
@@ -574,6 +897,9 @@ class ORBStrategy:
         self.opening_ranges.clear()
         self.signals_today.clear()
         self.sentiment_cache.clear()
+        # Phase 6: Reset risk management tracking
+        self.daily_pnl = 0.0
+        self.consecutive_losses = 0
         logger.info("Daily data reset")
 
 

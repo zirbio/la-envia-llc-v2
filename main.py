@@ -164,6 +164,11 @@ class TradingBot:
             for c in candidates:
                 orb_strategy.update_sentiment(c.symbol, c.sentiment_score)
 
+            # Phase 2: Cache intraday volume profiles for time-adjusted RVOL
+            logger.info("Building intraday volume profiles for watchlist...")
+            for symbol in self.watchlist:
+                market_data.cache_volume_profile(symbol, lookback_days=20)
+
             # Send watchlist to Telegram
             message = premarket_scanner.format_watchlist_message()
             await telegram_bot.send_watchlist(message)
@@ -196,6 +201,7 @@ class TradingBot:
     async def _monitor_breakouts(self):
         """Monitor watchlist for breakout signals"""
         logger.info("Monitoring for breakouts...")
+        daily_loss_alert_sent = False  # Avoid spamming
 
         while self.is_running and not telegram_bot.is_paused:
             try:
@@ -205,6 +211,19 @@ class TradingBot:
                 if now.time() >= time(16, 0):
                     logger.info("Trading window closed")
                     break
+
+                # Phase 6: Check daily loss limit circuit breaker
+                if orb_strategy.daily_pnl <= -settings.trading.max_daily_loss:
+                    if not daily_loss_alert_sent:
+                        await telegram_bot.send_message(
+                            f"🛑 *CIRCUIT BREAKER*\n"
+                            f"Daily loss limit reached: ${orb_strategy.daily_pnl:.2f}\n"
+                            f"No new trades until tomorrow."
+                        )
+                        daily_loss_alert_sent = True
+                        logger.warning(f"Daily loss limit hit: ${orb_strategy.daily_pnl:.2f}")
+                    await asyncio.sleep(60)  # Check less frequently when paused
+                    continue
 
                 # Check each symbol in watchlist
                 for symbol in self.watchlist:

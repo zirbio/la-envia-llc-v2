@@ -27,6 +27,8 @@ class MarketDataClient:
             secret_key=settings.alpaca.secret_key,
             paper=settings.alpaca.paper
         )
+        # Phase 2: Cache for intraday volume profiles by symbol
+        self.volume_profiles: dict[str, dict[int, float]] = {}
 
     def get_bars(
         self,
@@ -225,6 +227,166 @@ class MarketDataClient:
         if daily.empty:
             return 0
         return int(daily['volume'].mean())
+
+    def build_intraday_volume_profile(self, symbol: str, lookback_days: int = 20) -> dict[int, float]:
+        """
+        Phase 2: Build intraday volume profile for time-adjusted RVOL.
+
+        Calculates average volume by minute-of-day over last N trading days.
+
+        Args:
+            symbol: Stock symbol
+            lookback_days: Number of days to look back
+
+        Returns:
+            Dict mapping minute_index (0=9:30, 1=9:31, etc.) to average volume
+        """
+        try:
+            # Get minute bars for the last lookback_days
+            start = datetime.now() - timedelta(days=lookback_days + 7)  # Extra buffer for weekends
+
+            bars = self.get_bars(
+                symbol=symbol,
+                timeframe=TimeFrame.Minute,
+                start=start,
+                limit=lookback_days * 390  # ~390 minutes per trading day
+            )
+
+            if bars.empty:
+                logger.warning(f"No bars data for {symbol} volume profile")
+                return {}
+
+            # Group bars by minute-of-day (0-389 where 0 = 9:30 AM)
+            minute_volumes: dict[int, list[int]] = {}
+
+            for idx, row in bars.iterrows():
+                # Get timestamp and calculate minute index from market open (9:30)
+                ts = idx
+                if hasattr(ts, 'hour') and hasattr(ts, 'minute'):
+                    # Calculate minutes since 9:30 AM
+                    market_open_minutes = 9 * 60 + 30  # 9:30 AM in minutes
+                    bar_minutes = ts.hour * 60 + ts.minute
+                    minute_idx = bar_minutes - market_open_minutes
+
+                    # Only include regular trading hours (0-389)
+                    if 0 <= minute_idx < 390:
+                        if minute_idx not in minute_volumes:
+                            minute_volumes[minute_idx] = []
+                        minute_volumes[minute_idx].append(int(row['volume']))
+
+            # Calculate average volume for each minute
+            profile = {}
+            for minute_idx, volumes in minute_volumes.items():
+                if volumes:
+                    profile[minute_idx] = sum(volumes) / len(volumes)
+
+            if profile:
+                logger.debug(f"{symbol}: Built volume profile with {len(profile)} minutes")
+
+            return profile
+
+        except Exception as e:
+            logger.error(f"Error building volume profile for {symbol}: {e}")
+            return {}
+
+    def cache_volume_profile(self, symbol: str, lookback_days: int = 20) -> None:
+        """
+        Phase 2: Build and cache volume profile for a symbol.
+
+        Args:
+            symbol: Stock symbol
+            lookback_days: Number of days to look back
+        """
+        profile = self.build_intraday_volume_profile(symbol, lookback_days)
+        if profile:
+            self.volume_profiles[symbol] = profile
+            logger.info(f"Cached volume profile for {symbol}")
+
+    def calculate_time_adjusted_rvol(
+        self,
+        symbol: str,
+        current_minute: int,
+        cumulative_volume: int
+    ) -> float:
+        """
+        Phase 2: Calculate time-adjusted relative volume.
+
+        RVOL = cumulative_volume_today / expected_volume_at_this_time
+
+        Args:
+            symbol: Stock symbol
+            current_minute: Minutes since 9:30 (e.g., 16 = 9:46 AM)
+            cumulative_volume: Total volume traded today up to current_minute
+
+        Returns:
+            Time-adjusted relative volume ratio (1.0 = average, 2.0 = 2x typical)
+        """
+        profile = self.volume_profiles.get(symbol)
+
+        if not profile:
+            # Fallback to simple RVOL if no profile available
+            logger.debug(f"{symbol}: No volume profile, using fallback RVOL")
+            return 1.0
+
+        # Calculate expected cumulative volume up to current_minute
+        expected = sum(
+            profile.get(i, 0)
+            for i in range(current_minute + 1)
+        )
+
+        if expected <= 0:
+            return 1.0
+
+        rvol = cumulative_volume / expected
+
+        logger.debug(
+            f"{symbol}: Time-adjusted RVOL at minute {current_minute}: "
+            f"{rvol:.2f}x (cumul={cumulative_volume:,}, expected={expected:,.0f})"
+        )
+
+        return rvol
+
+    def get_cumulative_volume_today(self, symbol: str) -> int:
+        """
+        Phase 2: Get cumulative volume for today's session.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Total volume traded today from 9:30 to now
+        """
+        try:
+            # Get today's bars from market open
+            today = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
+
+            bars = self.get_bars(
+                symbol=symbol,
+                timeframe=TimeFrame.Minute,
+                start=today,
+                limit=390
+            )
+
+            if bars.empty:
+                return 0
+
+            return int(bars['volume'].sum())
+
+        except Exception as e:
+            logger.error(f"Error getting cumulative volume for {symbol}: {e}")
+            return 0
+
+    def get_current_minute_index(self) -> int:
+        """
+        Phase 2: Get current minute index since market open (9:30 AM).
+
+        Returns:
+            Minute index (0 = 9:30, 16 = 9:46, etc.)
+        """
+        now = datetime.now()
+        market_open_minutes = 9 * 60 + 30
+        current_minutes = now.hour * 60 + now.minute
+        return max(0, current_minutes - market_open_minutes)
 
 
 # Global client instance

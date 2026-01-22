@@ -79,12 +79,13 @@ class OrderExecutor:
             logger.error(f"Error getting account: {e}")
             return {}
 
-    def execute_signal(self, signal: TradeSignal) -> OrderResult:
+    def execute_signal(self, signal: TradeSignal, use_limit: bool = None) -> OrderResult:
         """
         Execute a trade signal
 
         Args:
             signal: TradeSignal to execute
+            use_limit: Override for limit order preference (defaults to settings)
 
         Returns:
             OrderResult with execution details
@@ -92,25 +93,56 @@ class OrderExecutor:
         try:
             side = OrderSide.BUY if signal.signal_type == SignalType.LONG else OrderSide.SELL
 
-            # Create bracket order (entry + stop loss + take profit)
-            order_request = MarketOrderRequest(
-                symbol=signal.symbol,
-                qty=signal.position_size,
-                side=side,
-                time_in_force=TimeInForce.DAY,
-                order_class="bracket",
-                stop_loss=StopLossRequest(stop_price=round(signal.stop_loss, 2)),
-                take_profit=TakeProfitRequest(limit_price=round(signal.take_profit, 2))
-            )
+            # Phase 5: Determine if using limit or market order
+            if use_limit is None:
+                use_limit = settings.trading.use_limit_entry
+
+            if use_limit:
+                # Calculate limit price with buffer
+                buffer_pct = settings.trading.limit_entry_buffer_pct
+
+                if signal.signal_type == SignalType.LONG:
+                    # Limit slightly above current price for long
+                    limit_price = signal.entry_price * (1 + buffer_pct)
+                else:
+                    # Limit slightly below current price for short
+                    limit_price = signal.entry_price * (1 - buffer_pct)
+
+                order_request = LimitOrderRequest(
+                    symbol=signal.symbol,
+                    qty=signal.position_size,
+                    side=side,
+                    time_in_force=TimeInForce.IOC,  # Immediate-or-cancel
+                    limit_price=round(limit_price, 2),
+                    order_class="bracket",
+                    stop_loss=StopLossRequest(stop_price=round(signal.stop_loss, 2)),
+                    take_profit=TakeProfitRequest(limit_price=round(signal.take_profit, 2))
+                )
+
+                logger.info(
+                    f"Order submitted: {side.value} {signal.position_size} {signal.symbol} "
+                    f"@ limit ${limit_price:.2f}, SL=${signal.stop_loss:.2f}, TP=${signal.take_profit:.2f}"
+                )
+            else:
+                # Create market bracket order (entry + stop loss + take profit)
+                order_request = MarketOrderRequest(
+                    symbol=signal.symbol,
+                    qty=signal.position_size,
+                    side=side,
+                    time_in_force=TimeInForce.DAY,
+                    order_class="bracket",
+                    stop_loss=StopLossRequest(stop_price=round(signal.stop_loss, 2)),
+                    take_profit=TakeProfitRequest(limit_price=round(signal.take_profit, 2))
+                )
+
+                logger.info(
+                    f"Order submitted: {side.value} {signal.position_size} {signal.symbol} "
+                    f"@ market, SL=${signal.stop_loss:.2f}, TP=${signal.take_profit:.2f}"
+                )
 
             order = self.client.submit_order(order_request)
 
             self.active_orders[signal.symbol] = order.id
-
-            logger.info(
-                f"Order submitted: {side.value} {signal.position_size} {signal.symbol} "
-                f"@ market, SL=${signal.stop_loss:.2f}, TP=${signal.take_profit:.2f}"
-            )
 
             return OrderResult(
                 success=True,

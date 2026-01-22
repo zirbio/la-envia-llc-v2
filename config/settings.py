@@ -72,6 +72,27 @@ class TradingConfig:
     rsi_oversold: int = 30
     rsi_period: int = 14
 
+    # Breakout confirmation (Phase 1)
+    breakout_buffer_pct: float = 0.001  # 0.1% buffer above/below ORB levels
+    require_candle_close: bool = True   # Require candle close for confirmation
+
+    # ORB range filter (Phase 3)
+    min_orb_range_pct: float = 0.3   # Min 0.3% range (tradeable movement)
+    max_orb_range_pct: float = 2.0   # Max 2.0% range (achievable 2R target)
+
+    # Scoring system (Phase 4)
+    min_signal_score: float = 70.0   # Minimum score to trigger signal (0-100)
+
+    # Execution (Phase 5)
+    use_limit_entry: bool = True
+    limit_entry_buffer_pct: float = 0.001  # 0.1%
+    stop_atr_multiplier: float = 1.5
+
+    # Risk management (Phase 6)
+    max_daily_loss: float = 750.0    # 3% of $25k - circuit breaker
+    max_consecutive_losses: int = 2  # Cooldown after consecutive losses
+    latest_trade_time: str = "11:30" # No new trades after this time
+
     # Watchlist
     max_watchlist_size: int = 10
 
