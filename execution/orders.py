@@ -11,7 +11,9 @@ from alpaca.trading.requests import (
     LimitOrderRequest,
     StopLossRequest,
     TakeProfitRequest,
-    GetOrdersRequest
+    GetOrdersRequest,
+    StopOrderRequest,
+    ReplaceOrderRequest
 )
 from alpaca.trading.enums import (
     OrderSide,
@@ -306,6 +308,210 @@ class OrderExecutor:
         except Exception as e:
             logger.error(f"Error getting open orders: {e}")
             return []
+
+    def execute_entry_order(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        use_limit: bool = False,
+        limit_price: float = None
+    ) -> OrderResult:
+        """
+        Execute an entry order without bracket (standalone)
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            use_limit: Whether to use limit order
+            limit_price: Limit price if using limit order
+
+        Returns:
+            OrderResult with order details
+        """
+        try:
+            order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+
+            if use_limit and limit_price:
+                order_request = LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=round(limit_price, 2)
+                )
+            else:
+                order_request = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY
+                )
+
+            order = self.client.submit_order(order_request)
+            self.active_orders[symbol] = order.id
+
+            logger.info(f"Entry order submitted: {side} {qty} {symbol}")
+
+            return OrderResult(
+                success=True,
+                order_id=order.id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                status=order.status.value
+            )
+
+        except Exception as e:
+            logger.error(f"Error executing entry order: {e}")
+            return OrderResult(success=False, error=str(e))
+
+    def create_stop_loss_order(
+        self,
+        symbol: str,
+        qty: int,
+        stop_price: float,
+        position_side: str
+    ) -> OrderResult:
+        """
+        Create a standalone stop loss order
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            stop_price: Stop trigger price
+            position_side: 'long' or 'short' (determines sell/buy)
+
+        Returns:
+            OrderResult with order details
+        """
+        try:
+            # For long positions, stop is a SELL order
+            # For short positions, stop is a BUY order
+            order_side = OrderSide.SELL if position_side.lower() == 'long' else OrderSide.BUY
+
+            order_request = StopOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                time_in_force=TimeInForce.DAY,
+                stop_price=round(stop_price, 2)
+            )
+
+            order = self.client.submit_order(order_request)
+
+            logger.info(
+                f"Stop loss order created: {symbol} qty={qty} @ ${stop_price:.2f}"
+            )
+
+            return OrderResult(
+                success=True,
+                order_id=order.id,
+                symbol=symbol,
+                side=order_side.value,
+                qty=qty,
+                status=order.status.value
+            )
+
+        except Exception as e:
+            logger.error(f"Error creating stop loss order: {e}")
+            return OrderResult(success=False, error=str(e))
+
+    def cancel_and_replace_stop(
+        self,
+        order_id: str,
+        new_stop_price: float
+    ) -> OrderResult:
+        """
+        Cancel existing stop order and create new one with updated price
+
+        Args:
+            order_id: Existing order ID to replace
+            new_stop_price: New stop price
+
+        Returns:
+            OrderResult with new order details
+        """
+        try:
+            # Use Alpaca's replace order endpoint
+            replace_request = ReplaceOrderRequest(
+                stop_price=round(new_stop_price, 2)
+            )
+
+            new_order = self.client.replace_order_by_id(
+                order_id=order_id,
+                order_data=replace_request
+            )
+
+            logger.info(
+                f"Stop order replaced: {order_id} -> {new_order.id} @ ${new_stop_price:.2f}"
+            )
+
+            return OrderResult(
+                success=True,
+                order_id=new_order.id,
+                symbol=new_order.symbol,
+                status=new_order.status.value
+            )
+
+        except Exception as e:
+            logger.error(f"Error replacing stop order: {e}")
+            return OrderResult(success=False, error=str(e))
+
+    def close_partial_position(
+        self,
+        symbol: str,
+        qty: int,
+        position_side: str
+    ) -> OrderResult:
+        """
+        Close a partial position
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares to close
+            position_side: 'long' or 'short'
+
+        Returns:
+            OrderResult with execution details
+        """
+        try:
+            # To close, we do the opposite: sell for longs, buy for shorts
+            close_side = 'sell' if position_side.lower() == 'long' else 'buy'
+            return self.execute_market_order(symbol, qty, close_side)
+
+        except Exception as e:
+            logger.error(f"Error closing partial position: {e}")
+            return OrderResult(success=False, error=str(e))
+
+    def get_order_by_id(self, order_id: str) -> Optional[dict]:
+        """
+        Get order details by ID
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Dict with order details or None
+        """
+        try:
+            order = self.client.get_order_by_id(order_id)
+            return {
+                'id': order.id,
+                'symbol': order.symbol,
+                'side': order.side.value,
+                'qty': order.qty,
+                'filled_qty': order.filled_qty,
+                'type': order.type.value,
+                'status': order.status.value,
+                'filled_avg_price': float(order.filled_avg_price) if order.filled_avg_price else None,
+                'stop_price': float(order.stop_price) if order.stop_price else None,
+                'created_at': order.created_at
+            }
+        except Exception as e:
+            logger.error(f"Error getting order {order_id}: {e}")
+            return None
 
     def is_market_open(self) -> bool:
         """Check if market is currently open"""

@@ -96,6 +96,15 @@ class TradingConfig:
     # Watchlist
     max_watchlist_size: int = 10
 
+    # Position Management - Partial Profit Taking
+    partial_close_enabled: bool = True
+    partial_close_at_r: float = 1.0       # Close 50% at 1R profit
+    partial_close_percent: float = 0.50    # Percentage to close
+    trailing_stop_enabled: bool = True
+    trailing_ema_period: int = 9           # EMA9 for trailing
+    trailing_bar_timeframe: int = 5        # 5-minute bars
+    position_check_interval: int = 5       # Check positions every 5 seconds
+
 
 @dataclass
 class Settings:

@@ -238,6 +238,160 @@ Win Rate: {win_rate:.0f}%
         """
         return await self.send_message(message.strip())
 
+    async def send_partial_close_alert(
+        self,
+        symbol: str,
+        closed_qty: int,
+        close_price: float,
+        remaining_qty: int,
+        new_stop: float,
+        realized_pnl: float,
+        r_multiple: float
+    ) -> bool:
+        """
+        Send notification when partial position is closed at 1R
+
+        Args:
+            symbol: Stock symbol
+            closed_qty: Shares closed
+            close_price: Price at which shares were closed
+            remaining_qty: Remaining shares
+            new_stop: New stop loss price (breakeven)
+            realized_pnl: Realized P/L from partial close
+            r_multiple: Current R-multiple
+
+        Returns:
+            True if sent successfully
+        """
+        pnl_emoji = "🟢" if realized_pnl >= 0 else "🔴"
+        direction = "+" if realized_pnl >= 0 else ""
+
+        message = f"""
+🎯 *CIERRE PARCIAL - 1R ALCANZADO*
+
+*{symbol}*
+
+━━━━━━━━━━━━━━━━━━━━
+Cerrado: {closed_qty} acciones @ ${close_price:.2f}
+Restante: {remaining_qty} acciones
+R-Multiple: {r_multiple:.1f}R
+{pnl_emoji} P/L Realizado: {direction}${realized_pnl:.2f}
+━━━━━━━━━━━━━━━━━━━━
+
+*Stop movido a breakeven:* ${new_stop:.2f}
+*Trailing EMA9 activado*
+        """
+        return await self.send_message(message.strip())
+
+    async def send_trailing_stop_update(
+        self,
+        symbol: str,
+        old_stop: float,
+        new_stop: float,
+        ema9_value: float
+    ) -> bool:
+        """
+        Send notification when trailing stop is updated
+
+        Args:
+            symbol: Stock symbol
+            old_stop: Previous stop price
+            new_stop: New stop price
+            ema9_value: Current EMA9 value
+
+        Returns:
+            True if sent successfully
+        """
+        # Determine direction
+        if new_stop > old_stop:
+            arrow = "⬆️"
+            direction = f"+${new_stop - old_stop:.2f}"
+        else:
+            arrow = "⬇️"
+            direction = f"-${old_stop - new_stop:.2f}"
+
+        message = f"""
+🔄 *TRAILING STOP ACTUALIZADO*
+
+*{symbol}*
+
+{arrow} Stop: ${old_stop:.2f} → ${new_stop:.2f} ({direction})
+EMA9 (5min): ${ema9_value:.2f}
+        """
+        return await self.send_message(message.strip())
+
+    async def send_trailing_activated(
+        self,
+        symbol: str,
+        ema_period: int,
+        timeframe: str
+    ) -> bool:
+        """
+        Send notification when trailing stop is activated
+
+        Args:
+            symbol: Stock symbol
+            ema_period: EMA period (e.g., 9)
+            timeframe: Bar timeframe (e.g., "5min")
+
+        Returns:
+            True if sent successfully
+        """
+        message = f"""
+🎚️ *TRAILING STOP ACTIVADO*
+
+*{symbol}*
+
+Trailing con EMA{ema_period} en barras de {timeframe}
+El stop se ajustara automaticamente siguiendo el EMA
+        """
+        return await self.send_message(message.strip())
+
+    async def send_position_stopped(
+        self,
+        symbol: str,
+        entry_price: float,
+        stop_price: float,
+        qty: int,
+        reason: str
+    ) -> bool:
+        """
+        Send notification when position is stopped out
+
+        Args:
+            symbol: Stock symbol
+            entry_price: Entry price
+            stop_price: Stop price that was hit
+            qty: Quantity closed
+            reason: Reason for stop (e.g., 'stop_loss', 'trailing_ema9')
+
+        Returns:
+            True if sent successfully
+        """
+        pnl = (stop_price - entry_price) * qty
+        if pnl < 0:
+            emoji = "🛑"
+            status = "STOP LOSS"
+        else:
+            emoji = "🎯"
+            status = "TRAILING STOP"
+
+        direction = "+" if pnl >= 0 else ""
+
+        message = f"""
+{emoji} *{status} ACTIVADO*
+
+*{symbol}*
+
+Entry: ${entry_price:.2f}
+Stop: ${stop_price:.2f}
+Qty: {qty}
+P/L: {direction}${pnl:.2f}
+
+Razon: {reason}
+        """
+        return await self.send_message(message.strip())
+
     async def ask_session_close_confirmation(self, positions: list, total_pnl: float) -> bool:
         """
         Ask user for confirmation before closing session

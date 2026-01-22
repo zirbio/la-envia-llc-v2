@@ -19,6 +19,7 @@ from data.market_data import market_data
 from scanner.premarket import premarket_scanner, SCAN_UNIVERSE
 from strategy.orb import orb_strategy, TradeSignal
 from execution.orders import order_executor
+from execution.position_manager import position_manager, PositionEvent
 from notifications.telegram_bot import telegram_bot
 
 
@@ -49,6 +50,7 @@ class TradingBot:
         self.watchlist: list[str] = []
         self.trades_today: list[dict] = []
         self.monitoring_task: Optional[asyncio.Task] = None
+        self.position_monitoring_task: Optional[asyncio.Task] = None
 
     async def start(self):
         """Start the trading bot"""
@@ -61,6 +63,9 @@ class TradingBot:
             await telegram_bot.initialize()
             telegram_bot.on_confirmation = self._on_trade_confirmed
             asyncio.create_task(telegram_bot.start_polling())
+
+        # Initialize position manager event handler
+        position_manager.on_event = self._on_position_event
 
         # Schedule daily tasks
         self._schedule_tasks()
@@ -91,6 +96,9 @@ class TradingBot:
 
         if self.monitoring_task:
             self.monitoring_task.cancel()
+
+        if self.position_monitoring_task:
+            self.position_monitoring_task.cancel()
 
         self.scheduler.shutdown()
 
@@ -198,6 +206,10 @@ class TradingBot:
         logger.info("Starting breakout monitoring...")
         self.monitoring_task = asyncio.create_task(self._monitor_breakouts())
 
+        # Start position monitoring for trailing stops and partial closes
+        logger.info("Starting position monitoring...")
+        self.position_monitoring_task = asyncio.create_task(self._monitor_positions())
+
     async def _monitor_breakouts(self):
         """Monitor watchlist for breakout signals"""
         logger.info("Monitoring for breakouts...")
@@ -273,31 +285,163 @@ class TradingBot:
         except Exception as e:
             logger.error(f"Error checking {symbol}: {e}")
 
+    async def _monitor_positions(self):
+        """Monitor managed positions for partial closes and trailing stops"""
+        logger.info("Position monitoring started...")
+
+        while self.is_running and not telegram_bot.is_paused:
+            try:
+                now = datetime.now(EST)
+
+                # Stop monitoring after 16:00 (market close)
+                if now.time() >= time(16, 0):
+                    logger.info("Position monitoring window closed")
+                    break
+
+                # Check all managed positions
+                events = await position_manager.check_all_positions()
+
+                # Handle any events that occurred
+                for event in events:
+                    await self._on_position_event(event)
+
+                # Wait before next check (configurable interval)
+                await asyncio.sleep(settings.trading.position_check_interval)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in position monitoring loop: {e}")
+                await asyncio.sleep(5)
+
+        logger.info("Position monitoring stopped")
+
+    async def _on_position_event(self, event: PositionEvent):
+        """Handle position management events and send notifications"""
+        try:
+            if event.event_type == 'partial_close':
+                await telegram_bot.send_partial_close_alert(
+                    symbol=event.symbol,
+                    closed_qty=event.details.get('closed_qty', 0),
+                    close_price=event.details.get('close_price', 0),
+                    remaining_qty=event.details.get('remaining_qty', 0),
+                    new_stop=event.details.get('new_stop', 0),
+                    realized_pnl=event.details.get('realized_pnl', 0),
+                    r_multiple=event.details.get('r_multiple', 0)
+                )
+
+            elif event.event_type == 'trailing_activated':
+                await telegram_bot.send_trailing_activated(
+                    symbol=event.symbol,
+                    ema_period=event.details.get('ema_period', 9),
+                    timeframe=event.details.get('timeframe', '5min')
+                )
+
+            elif event.event_type == 'stop_updated':
+                await telegram_bot.send_trailing_stop_update(
+                    symbol=event.symbol,
+                    old_stop=event.details.get('old_stop', 0),
+                    new_stop=event.details.get('new_stop', 0),
+                    ema9_value=event.details.get('ema9', 0)
+                )
+
+            elif event.event_type == 'position_closed':
+                position = position_manager.get_position(event.symbol)
+                if position:
+                    await telegram_bot.send_position_stopped(
+                        symbol=event.symbol,
+                        entry_price=position.entry_price,
+                        stop_price=position.current_stop_loss,
+                        qty=position.current_qty,
+                        reason=event.details.get('reason', 'unknown')
+                    )
+
+                    # Record trade result for Kelly calculation
+                    orb_strategy.record_trade_result(
+                        symbol=event.symbol,
+                        entry_price=position.entry_price,
+                        exit_price=position.current_stop_loss,
+                        is_long=(position.side == 'long')
+                    )
+
+        except Exception as e:
+            logger.error(f"Error handling position event: {e}")
+
     async def _on_trade_confirmed(self, signal: TradeSignal):
-        """Handle confirmed trade from Telegram"""
+        """Handle confirmed trade from Telegram with managed execution"""
         logger.info(f"Trade confirmed: {signal.signal_type.value} {signal.symbol}")
 
-        result = order_executor.execute_signal(signal)
+        # Determine order side
+        entry_side = 'buy' if signal.signal_type.value == 'LONG' else 'sell'
+        position_side = 'long' if signal.signal_type.value == 'LONG' else 'short'
 
-        if result.success:
-            await telegram_bot.send_execution_confirmation(
-                symbol=signal.symbol,
-                side=signal.signal_type.value,
-                qty=signal.position_size,
-                price=signal.entry_price
+        # Execute entry order (standalone, no bracket)
+        entry_result = order_executor.execute_entry_order(
+            symbol=signal.symbol,
+            qty=signal.position_size,
+            side=entry_side,
+            use_limit=settings.trading.use_limit_entry,
+            limit_price=signal.entry_price if settings.trading.use_limit_entry else None
+        )
+
+        if not entry_result.success:
+            await telegram_bot.send_message(f"❌ Error ejecutando entrada: {entry_result.error}")
+            return
+
+        # Get fill price from order (may need to wait for fill)
+        fill_price = signal.entry_price  # Use signal price as estimate
+
+        # Create standalone stop loss order
+        stop_result = order_executor.create_stop_loss_order(
+            symbol=signal.symbol,
+            qty=signal.position_size,
+            stop_price=signal.stop_loss,
+            position_side=position_side
+        )
+
+        if not stop_result.success:
+            logger.error(f"Failed to create stop loss: {stop_result.error}")
+            await telegram_bot.send_message(
+                f"⚠️ Entrada ejecutada pero error en stop loss: {stop_result.error}\n"
+                f"Por favor crear stop manualmente @ ${signal.stop_loss:.2f}"
             )
-
-            self.trades_today.append({
-                'symbol': signal.symbol,
-                'side': signal.signal_type.value,
-                'entry': signal.entry_price,
-                'stop': signal.stop_loss,
-                'target': signal.take_profit,
-                'qty': signal.position_size,
-                'time': datetime.now(EST)
-            })
+            stop_order_id = None
         else:
-            await telegram_bot.send_message(f"❌ Error ejecutando orden: {result.error}")
+            stop_order_id = stop_result.order_id
+
+        # Register position for management
+        await position_manager.register_position(
+            signal=signal,
+            fill_price=fill_price,
+            qty=signal.position_size,
+            stop_order_id=stop_order_id
+        )
+
+        # Send confirmation
+        await telegram_bot.send_execution_confirmation(
+            symbol=signal.symbol,
+            side=signal.signal_type.value,
+            qty=signal.position_size,
+            price=fill_price
+        )
+
+        # Notify about position management
+        await telegram_bot.send_message(
+            f"📊 *Gestion de posicion activada*\n"
+            f"- Cierre parcial (50%) al alcanzar 1R\n"
+            f"- Stop movido a breakeven tras cierre parcial\n"
+            f"- Trailing con EMA9 (5min) para el resto"
+        )
+
+        self.trades_today.append({
+            'symbol': signal.symbol,
+            'side': signal.signal_type.value,
+            'entry': fill_price,
+            'stop': signal.stop_loss,
+            'target': signal.take_profit,
+            'qty': signal.position_size,
+            'time': datetime.now(EST)
+        })
 
     async def _end_session(self):
         """End trading session"""
@@ -306,6 +450,10 @@ class TradingBot:
         # Stop monitoring
         if self.monitoring_task:
             self.monitoring_task.cancel()
+
+        # Stop position monitoring
+        if self.position_monitoring_task:
+            self.position_monitoring_task.cancel()
 
         # Get positions and P/L
         positions = order_executor.get_positions()
@@ -341,6 +489,7 @@ class TradingBot:
         """Reset daily data"""
         logger.info("Resetting daily data...")
         orb_strategy.reset_daily()
+        position_manager.reset()
         self.watchlist.clear()
         self.trades_today.clear()
         logger.info("Daily reset complete")

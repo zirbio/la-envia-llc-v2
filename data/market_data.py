@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import pandas as pd
 from alpaca.data import StockHistoricalDataClient, StockBarsRequest, StockLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest
 from alpaca.trading.enums import AssetClass, AssetStatus
@@ -387,6 +387,23 @@ class MarketDataClient:
         market_open_minutes = 9 * 60 + 30
         current_minutes = now.hour * 60 + now.minute
         return max(0, current_minutes - market_open_minutes)
+
+    def get_5min_bars(self, symbol: str, limit: int = 50) -> pd.DataFrame:
+        """
+        Get 5-minute bars for trailing stop EMA calculation
+
+        Args:
+            symbol: Stock symbol
+            limit: Maximum number of bars to retrieve
+
+        Returns:
+            DataFrame with OHLCV data in 5-minute intervals
+        """
+        return self.get_bars(
+            symbol=symbol,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            limit=limit
+        )
 
 
 # Global client instance
