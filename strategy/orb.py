@@ -186,9 +186,9 @@ class ORBStrategy:
 
         orb = self.opening_ranges[symbol]
 
-        # Check daily trade limit
+        # Check daily trade limit (use debug to avoid spam during monitoring)
         if len(self.signals_today) >= self.config.max_trades_per_day:
-            logger.info("Daily trade limit reached")
+            logger.debug("Daily trade limit reached")
             return None
 
         # Get current market data with indicators
@@ -247,20 +247,33 @@ class ORBStrategy:
         sentiment: float = 0.0
     ) -> bool:
         """Check if all LONG conditions are met (including MACD and sentiment)"""
-        conditions = [
-            price > orb.high,  # Price above ORB high
-            price > vwap,  # Price above VWAP
-            rel_volume >= self.config.min_relative_volume,  # Volume spike
-            rsi < self.config.rsi_overbought,  # Not overbought
-            macd_bullish,  # MACD confirmation
-            sentiment >= settings.sentiment.min_score_long  # Not strongly negative sentiment
-        ]
+        # Check each condition individually for logging
+        c1 = price > orb.high
+        c2 = price > vwap
+        c3 = rel_volume >= self.config.min_relative_volume
+        c4 = rsi < self.config.rsi_overbought
+        c5 = macd_bullish
+        c6 = sentiment >= settings.sentiment.min_score_long
+
+        conditions = [c1, c2, c3, c4, c5, c6]
+
+        # Log diagnostic info for this symbol
+        status = (
+            f"{'✓' if c1 else '✗'} price>${'ORB' if c1 else f'ORB({orb.high:.2f})'} "
+            f"{'✓' if c2 else '✗'} VWAP "
+            f"{'✓' if c3 else '✗'} vol({rel_volume:.1f}x) "
+            f"{'✓' if c4 else '✗'} RSI({rsi:.0f}) "
+            f"{'✓' if c5 else '✗'} MACD "
+            f"{'✓' if c6 else '✗'} sent({sentiment:.2f})"
+        )
+
+        if any([c1, c2]):  # Only log if price is near breakout levels
+            logger.info(f"LONG {orb.symbol}: ${price:.2f} | {status}")
 
         if all(conditions):
-            logger.debug(
-                f"LONG conditions met: price={price:.2f} > ORB high={orb.high:.2f}, "
-                f"price > VWAP={vwap:.2f}, rel_vol={rel_volume:.1f}x, RSI={rsi:.0f}, "
-                f"MACD=✓, sentiment={sentiment:.2f}"
+            logger.info(
+                f"🟢 LONG SIGNAL {orb.symbol}: price={price:.2f} > ORB={orb.high:.2f}, "
+                f"VWAP={vwap:.2f}, vol={rel_volume:.1f}x, RSI={rsi:.0f}, sent={sentiment:.2f}"
             )
 
         return all(conditions)
@@ -276,20 +289,33 @@ class ORBStrategy:
         sentiment: float = 0.0
     ) -> bool:
         """Check if all SHORT conditions are met (including MACD and sentiment)"""
-        conditions = [
-            price < orb.low,  # Price below ORB low
-            price < vwap,  # Price below VWAP
-            rel_volume >= self.config.min_relative_volume,  # Volume spike
-            rsi > self.config.rsi_oversold,  # Not oversold
-            macd_bearish,  # MACD confirmation
-            sentiment <= settings.sentiment.max_score_short  # Not strongly positive sentiment
-        ]
+        # Check each condition individually for logging
+        c1 = price < orb.low
+        c2 = price < vwap
+        c3 = rel_volume >= self.config.min_relative_volume
+        c4 = rsi > self.config.rsi_oversold
+        c5 = macd_bearish
+        c6 = sentiment <= settings.sentiment.max_score_short
+
+        conditions = [c1, c2, c3, c4, c5, c6]
+
+        # Log diagnostic info for this symbol
+        status = (
+            f"{'✓' if c1 else '✗'} price<{'ORB' if c1 else f'ORB({orb.low:.2f})'} "
+            f"{'✓' if c2 else '✗'} VWAP "
+            f"{'✓' if c3 else '✗'} vol({rel_volume:.1f}x) "
+            f"{'✓' if c4 else '✗'} RSI({rsi:.0f}) "
+            f"{'✓' if c5 else '✗'} MACD "
+            f"{'✓' if c6 else '✗'} sent({sentiment:.2f})"
+        )
+
+        if any([c1, c2]):  # Only log if price is near breakout levels
+            logger.info(f"SHORT {orb.symbol}: ${price:.2f} | {status}")
 
         if all(conditions):
-            logger.debug(
-                f"SHORT conditions met: price={price:.2f} < ORB low={orb.low:.2f}, "
-                f"price < VWAP={vwap:.2f}, rel_vol={rel_volume:.1f}x, RSI={rsi:.0f}, "
-                f"MACD=✓, sentiment={sentiment:.2f}"
+            logger.info(
+                f"🔴 SHORT SIGNAL {orb.symbol}: price={price:.2f} < ORB={orb.low:.2f}, "
+                f"VWAP={vwap:.2f}, vol={rel_volume:.1f}x, RSI={rsi:.0f}, sent={sentiment:.2f}"
             )
 
         return all(conditions)
