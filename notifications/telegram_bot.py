@@ -133,28 +133,159 @@ class TradingTelegramBot:
         risk_pct = (signal.risk_amount / settings.trading.max_capital) * 100
         reward = signal.risk_amount * settings.trading.reward_risk_ratio
 
+        # Get quality level badge
+        quality_badge = self._get_quality_badge(signal.quality_level)
+        current_level = settings.trading.signal_level.value
+        min_score = settings.trading.min_signal_score
+
+        # Calculate individual score components for breakdown
+        score_breakdown = self._calculate_score_breakdown(signal)
+
+        # Build breakdown section
+        breakdown_lines = []
+        for component, (points, max_pts, detail) in score_breakdown.items():
+            if points >= max_pts * 0.6:  # Good score
+                marker = "✓"
+            elif points >= max_pts * 0.3:  # Partial score
+                marker = "○"
+            else:  # Low score
+                marker = "✗"
+            breakdown_lines.append(f"{marker} {component}: {points:.0f}/{max_pts} pts {detail}")
+
+        breakdown_text = "\n".join(breakdown_lines)
+
+        # Warning if signal doesn't meet current threshold
+        warning_text = ""
+        threshold_quality = self._get_threshold_quality_name(min_score)
+        if signal.signal_score < min_score:
+            warning_text = f"\n⚠️ *Calidad {signal.quality_level} - no alcanza umbral {threshold_quality} ({min_score:.0f} pts)*\n"
+
         message = f"""
-{emoji} *SIGNAL: {direction} {signal.symbol}*
+{emoji} *SEÑAL: {direction} {signal.symbol}*
+
+{quality_badge} Score: {signal.signal_score:.0f}/100 → *{signal.quality_level}*
+⚙️ Umbral actual: {min_score:.0f} pts ({threshold_quality})
 
 *Entry:* ${signal.entry_price:.2f}
-*ORB High:* ${signal.orb_high:.2f} {'✓' if signal.signal_type == SignalType.LONG else ''}
-*ORB Low:* ${signal.orb_low:.2f} {'✓' if signal.signal_type == SignalType.SHORT else ''}
-*VWAP:* ${signal.vwap:.2f} ✓
-*Volume:* {signal.relative_volume:.1f}x ✓
-*RSI:* {signal.rsi:.0f}
-
-━━━━━━━━━━━━━━━━━━━━
 *Stop Loss:* ${signal.stop_loss:.2f}
 *Take Profit:* ${signal.take_profit:.2f}
-*Position:* {signal.position_size} shares (${signal.position_size * signal.entry_price:,.0f})
+*Position:* {signal.position_size} shares
+
+━━━ Desglose ━━━
+{breakdown_text}
+━━━━━━━━━━━━━━━━━━━━
 *Risk:* ${signal.risk_amount:.2f} ({risk_pct:.1f}%)
 *Reward:* ${reward:.2f} (2:1)
-━━━━━━━━━━━━━━━━━━━━
-
-Reply *SI* to execute or *NO* to skip
+{warning_text}
+Reply *SI* para ejecutar, *NO* para skip
         """
 
         return await self.send_message(message.strip())
+
+    def _get_quality_badge(self, quality_level: str) -> str:
+        """Get emoji badge for quality level"""
+        badges = {
+            'ÓPTIMA': '🟢',
+            'BUENA': '🟡',
+            'REGULAR': '🟠',
+            'DÉBIL': '🔴'
+        }
+        return badges.get(quality_level, '⚪')
+
+    def _get_threshold_quality_name(self, min_score: float) -> str:
+        """Get Spanish quality name for threshold score"""
+        if min_score >= 70:
+            return 'ÓPTIMA'
+        elif min_score >= 55:
+            return 'BUENA'
+        elif min_score >= 40:
+            return 'REGULAR'
+        else:
+            return 'DÉBIL'
+
+    def _calculate_score_breakdown(self, signal: TradeSignal) -> dict:
+        """
+        Calculate individual score components for display.
+
+        Returns dict of component -> (points, max_points, detail_string)
+        """
+        breakdown = {}
+        direction = signal.signal_type.value
+
+        # BREAKOUT (0-25 pts)
+        # Approximation based on signal having been triggered
+        if direction == 'LONG':
+            breakout_pct = ((signal.entry_price - signal.orb_high) / signal.orb_high) * 100
+        else:
+            breakout_pct = ((signal.orb_low - signal.entry_price) / signal.orb_low) * 100
+        breakout_pts = min(breakout_pct * 50, 25) if breakout_pct > 0 else 0
+        breakdown['Breakout'] = (breakout_pts, 25, f"({breakout_pct:.2f}%)")
+
+        # VWAP (0-15 pts)
+        if signal.vwap > 0:
+            vwap_dist_pct = abs(signal.entry_price - signal.vwap) / signal.vwap * 100
+            vwap_aligned = (direction == 'LONG' and signal.entry_price > signal.vwap) or \
+                          (direction == 'SHORT' and signal.entry_price < signal.vwap)
+            vwap_pts = min(vwap_dist_pct * 15, 15) if vwap_aligned else 0
+        else:
+            vwap_pts = 0
+            vwap_dist_pct = 0
+        breakdown['VWAP'] = (vwap_pts, 15, f"({'✓' if vwap_pts > 0 else '✗'})")
+
+        # VOLUME (0-20 pts)
+        vol = signal.relative_volume
+        if vol >= 2.5:
+            vol_pts = 20
+        elif vol >= 2.0:
+            vol_pts = 15
+        elif vol >= 1.5:
+            vol_pts = 10
+        elif vol >= 1.2:
+            vol_pts = 5
+        else:
+            vol_pts = 0
+        breakdown['Volume'] = (vol_pts, 20, f"({vol:.1f}x)")
+
+        # RSI (0-15 pts)
+        rsi = signal.rsi
+        if direction == 'LONG':
+            if 40 <= rsi <= 60:
+                rsi_pts = 15
+            elif 30 <= rsi <= 70:
+                rsi_pts = 10
+            elif rsi < 30:
+                rsi_pts = 5
+            else:
+                rsi_pts = 0
+        else:
+            if 40 <= rsi <= 60:
+                rsi_pts = 15
+            elif 30 <= rsi <= 70:
+                rsi_pts = 10
+            elif rsi > 70:
+                rsi_pts = 5
+            else:
+                rsi_pts = 0
+        breakdown['RSI'] = (rsi_pts, 15, f"({rsi:.0f})")
+
+        # MACD (0-15 pts)
+        hist = signal.macd_histogram
+        if (direction == 'LONG' and hist > 0) or (direction == 'SHORT' and hist < 0):
+            macd_pts = min(abs(hist) * 100, 15)
+        else:
+            macd_pts = 0
+        macd_status = "✓" if macd_pts > 7 else ("○" if macd_pts > 0 else "✗")
+        breakdown['MACD'] = (macd_pts, 15, f"({macd_status})")
+
+        # SENTIMENT (0-10 pts)
+        sent = signal.sentiment_score
+        if direction == 'LONG':
+            sent_pts = max(0, min((sent + 1) * 5, 10))
+        else:
+            sent_pts = max(0, min((1 - sent) * 5, 10))
+        breakdown['Sentiment'] = (sent_pts, 10, f"({sent:.2f})")
+
+        return breakdown
 
     async def send_watchlist(self, watchlist_message: str) -> bool:
         """Send watchlist alert"""

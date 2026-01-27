@@ -63,6 +63,8 @@ class TradeSignal:
     sentiment_score: float = 0.0
     # Phase 4: Signal quality score (0-100)
     signal_score: float = 0.0
+    # Signal quality classification (ÓPTIMA/BUENA/REGULAR/DÉBIL)
+    quality_level: str = ''
 
     def __str__(self) -> str:
         emoji = "🟢" if self.signal_type == SignalType.LONG else "🔴"
@@ -509,6 +511,25 @@ class ORBStrategy:
 
         return score
 
+    def classify_signal_quality(self, score: float) -> str:
+        """
+        Classify signal by quality level based on score.
+
+        Args:
+            score: Signal score (0-100)
+
+        Returns:
+            Quality level: 'ÓPTIMA', 'BUENA', 'REGULAR', or 'DÉBIL'
+        """
+        if score >= 70:
+            return 'ÓPTIMA'
+        elif score >= 55:
+            return 'BUENA'
+        elif score >= 40:
+            return 'REGULAR'
+        else:
+            return 'DÉBIL'
+
     def _check_breakout_with_scoring(
         self,
         symbol: str,
@@ -524,15 +545,12 @@ class ORBStrategy:
         """
         Check for breakout using soft scoring system (Phase 4).
 
+        Returns all signals without filtering - classification shown to user.
+
         Returns:
             Tuple of (direction, score) if breakout detected, None otherwise
         """
         buffer = self.config.breakout_buffer_pct
-
-        # HARD REQUIREMENTS (must pass)
-        # 1. Minimum volume floor
-        if rel_volume < 1.2:
-            return None
 
         # Check LONG breakout
         long_breakout_level = orb.high * (1 + buffer)
@@ -553,34 +571,30 @@ class ORBStrategy:
         if not long_breakout and not short_breakout:
             return None
 
-        # Calculate scores for the valid direction(s)
+        # Calculate scores and return signal (no filtering - show all to user)
         if long_breakout:
             long_score = self._calculate_signal_score(
                 price, orb, vwap, rsi, rel_volume, macd_histogram, sentiment, 'LONG', last_candle_close
             )
-            if long_score >= self.config.min_signal_score:
-                logger.info(
-                    f"🟢 LONG {symbol}: score={long_score:.0f}/100, "
-                    f"price=${price:.2f} > ORB+buf=${long_breakout_level:.2f}, "
-                    f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
-                )
-                return ('LONG', long_score)
-            else:
-                logger.debug(f"LONG {symbol}: score {long_score:.0f} below threshold {self.config.min_signal_score}")
+            quality = self.classify_signal_quality(long_score)
+            logger.info(
+                f"🟢 LONG {symbol}: score={long_score:.0f}/100 [{quality}], "
+                f"price=${price:.2f} > ORB+buf=${long_breakout_level:.2f}, "
+                f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
+            )
+            return ('LONG', long_score)
 
         if short_breakout:
             short_score = self._calculate_signal_score(
                 price, orb, vwap, rsi, rel_volume, macd_histogram, sentiment, 'SHORT', last_candle_close
             )
-            if short_score >= self.config.min_signal_score:
-                logger.info(
-                    f"🔴 SHORT {symbol}: score={short_score:.0f}/100, "
-                    f"price=${price:.2f} < ORB-buf=${short_breakout_level:.2f}, "
-                    f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
-                )
-                return ('SHORT', short_score)
-            else:
-                logger.debug(f"SHORT {symbol}: score {short_score:.0f} below threshold {self.config.min_signal_score}")
+            quality = self.classify_signal_quality(short_score)
+            logger.info(
+                f"🔴 SHORT {symbol}: score={short_score:.0f}/100 [{quality}], "
+                f"price=${price:.2f} < ORB-buf=${short_breakout_level:.2f}, "
+                f"vol={rel_volume:.1f}x, RSI={rsi:.0f}"
+            )
+            return ('SHORT', short_score)
 
         return None
 
@@ -659,6 +673,8 @@ class ORBStrategy:
             entry_price, stop_loss
         )
 
+        quality_level = self.classify_signal_quality(signal_score)
+
         signal = TradeSignal(
             symbol=symbol,
             signal_type=SignalType.LONG,
@@ -677,11 +693,12 @@ class ORBStrategy:
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
             sentiment_score=sentiment,
-            signal_score=signal_score
+            signal_score=signal_score,
+            quality_level=quality_level
         )
 
         self.signals_today.append(signal)
-        logger.info(f"LONG signal generated: {signal}")
+        logger.info(f"LONG signal generated [{quality_level}]: {signal}")
 
         return signal
 
@@ -709,6 +726,8 @@ class ORBStrategy:
             entry_price, stop_loss
         )
 
+        quality_level = self.classify_signal_quality(signal_score)
+
         signal = TradeSignal(
             symbol=symbol,
             signal_type=SignalType.SHORT,
@@ -727,11 +746,12 @@ class ORBStrategy:
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
             sentiment_score=sentiment,
-            signal_score=signal_score
+            signal_score=signal_score,
+            quality_level=quality_level
         )
 
         self.signals_today.append(signal)
-        logger.info(f"SHORT signal generated: {signal}")
+        logger.info(f"SHORT signal generated [{quality_level}]: {signal}")
 
         return signal
 

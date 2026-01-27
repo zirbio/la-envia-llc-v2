@@ -377,6 +377,10 @@ class TradingConfig:
     min_monitoring_interval: int = 5       # Minimum when active
     max_monitoring_interval: int = 30      # Maximum when quiet
 
+    # Show all signals mode (default: True - show all signals with classification)
+    # Set to False to restore previous behavior (only show signals meeting threshold)
+    show_all_signals: bool = True
+
     @property
     def signal_config(self) -> SignalLevelConfig:
         """Get the active signal level configuration"""
