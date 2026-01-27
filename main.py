@@ -51,6 +51,10 @@ class TradingBot:
         self.trades_today: list[dict] = []
         self.monitoring_task: Optional[asyncio.Task] = None
         self.position_monitoring_task: Optional[asyncio.Task] = None
+        # Adaptive polling
+        self.current_interval = settings.trading.base_monitoring_interval
+        self.last_signal_time: Optional[datetime] = None
+        self.checks_without_signal = 0
 
     async def start(self):
         """Start the trading bot"""
@@ -78,6 +82,13 @@ class TradingBot:
         logger.info(f"Paper Trading: {settings.alpaca.paper}")
         logger.info(f"Max Capital: ${settings.trading.max_capital:,}")
         logger.info(f"Risk per trade: {settings.trading.risk_per_trade * 100}%")
+        # Log signal level configuration
+        level_info = orb_strategy.get_signal_level_info()
+        logger.info(f"Signal Level: {level_info['level']}")
+        logger.info(f"  - Min Signal Score: {level_info['min_signal_score']}")
+        logger.info(f"  - Min Relative Volume: {level_info['min_relative_volume']}x")
+        logger.info(f"  - ORB Range: {level_info['min_orb_range_pct']}% - {level_info['max_orb_range_pct']}%")
+        logger.info(f"  - Latest Trade Time: {level_info['latest_trade_time']}")
 
         # Check if we're already in trading window
         await self._check_immediate_start()
@@ -211,9 +222,10 @@ class TradingBot:
         self.position_monitoring_task = asyncio.create_task(self._monitor_positions())
 
     async def _monitor_breakouts(self):
-        """Monitor watchlist for breakout signals"""
+        """Monitor watchlist for breakout signals with adaptive polling"""
         logger.info("Monitoring for breakouts...")
         daily_loss_alert_sent = False  # Avoid spamming
+        signal_found_this_cycle = False
 
         while self.is_running and not telegram_bot.is_paused:
             try:
@@ -238,11 +250,37 @@ class TradingBot:
                     continue
 
                 # Check each symbol in watchlist
+                signal_found_this_cycle = False
                 for symbol in self.watchlist:
-                    await self._check_symbol(symbol)
+                    signal = await self._check_symbol(symbol)
+                    if signal:
+                        signal_found_this_cycle = True
+                        self.last_signal_time = now
+                        self.checks_without_signal = 0
 
-                # Wait before next check
-                await asyncio.sleep(10)  # Check every 10 seconds
+                # Adaptive polling: adjust interval based on activity
+                if signal_found_this_cycle:
+                    # Signal found - use minimum interval
+                    self.current_interval = settings.trading.min_monitoring_interval
+                else:
+                    self.checks_without_signal += 1
+                    # Gradually increase interval when quiet (every 10 checks without signal)
+                    if self.checks_without_signal % 10 == 0:
+                        self.current_interval = min(
+                            self.current_interval + 5,
+                            settings.trading.max_monitoring_interval
+                        )
+
+                # Log monitoring status periodically (every 30 cycles = ~5 min at 10s interval)
+                if self.checks_without_signal > 0 and self.checks_without_signal % 30 == 0:
+                    logger.info(
+                        f"Monitoring: {len(self.watchlist)} symbols | "
+                        f"Interval: {self.current_interval}s | "
+                        f"Checks w/o signal: {self.checks_without_signal}"
+                    )
+
+                # Wait before next check (adaptive interval)
+                await asyncio.sleep(self.current_interval)
 
             except asyncio.CancelledError:
                 break
@@ -250,13 +288,13 @@ class TradingBot:
                 logger.error(f"Error in monitoring loop: {e}")
                 await asyncio.sleep(5)
 
-    async def _check_symbol(self, symbol: str):
+    async def _check_symbol(self, symbol: str) -> Optional[TradeSignal]:
         """Check a symbol for breakout signal"""
         try:
             # Get current quote
             quote = market_data.get_latest_quote(symbol)
             if not quote:
-                return
+                return None
 
             current_price = quote['mid']
 
@@ -266,7 +304,7 @@ class TradingBot:
             # Get recent bars for current volume
             bars = market_data.get_bars(symbol, limit=5)
             if bars.empty:
-                return
+                return None
 
             current_volume = int(bars['volume'].iloc[-1])
 
@@ -281,9 +319,13 @@ class TradingBot:
             if signal:
                 logger.info(f"Signal detected for {symbol}")
                 await telegram_bot.send_signal_alert(signal)
+                return signal
+
+            return None
 
         except Exception as e:
             logger.error(f"Error checking {symbol}: {e}")
+            return None
 
     async def _monitor_positions(self):
         """Monitor managed positions for partial closes and trailing stops"""
@@ -492,6 +534,13 @@ class TradingBot:
         position_manager.reset()
         self.watchlist.clear()
         self.trades_today.clear()
+        # Reset adaptive polling state
+        self.current_interval = settings.trading.base_monitoring_interval
+        self.last_signal_time = None
+        self.checks_without_signal = 0
+        # Clear indicator cache
+        from data.indicators import indicator_cache
+        indicator_cache.invalidate()
         logger.info("Daily reset complete")
 
     async def _check_immediate_start(self):

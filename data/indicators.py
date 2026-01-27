@@ -3,7 +3,10 @@ Technical indicators for trading signals
 """
 import pandas as pd
 import numpy as np
+import hashlib
 from typing import Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from loguru import logger
 
 
@@ -410,3 +413,135 @@ class IndicatorCalculator:
             'prev_stoch_k': prev.get('stoch_k'),
             'prev_stoch_d': prev.get('stoch_d'),
         }
+
+
+@dataclass
+class CacheEntry:
+    """Single cache entry with TTL"""
+    data: dict
+    data_hash: str
+    timestamp: datetime
+    ttl_seconds: int = 10
+
+    def is_valid(self, new_hash: str) -> bool:
+        """Check if cache entry is still valid"""
+        # Check if data has changed
+        if new_hash != self.data_hash:
+            return False
+        # Check if TTL has expired
+        if datetime.now() - self.timestamp > timedelta(seconds=self.ttl_seconds):
+            return False
+        return True
+
+
+class IndicatorCache:
+    """
+    Cache for computed indicators to reduce CPU usage.
+
+    Stores computed indicators per symbol with TTL. Uses hash of recent
+    bar data to detect changes and invalidate cache.
+    """
+
+    def __init__(self, ttl_seconds: int = 10, hash_bars: int = 5):
+        """
+        Initialize indicator cache.
+
+        Args:
+            ttl_seconds: Time-to-live for cache entries
+            hash_bars: Number of recent bars to hash for change detection
+        """
+        self.ttl_seconds = ttl_seconds
+        self.hash_bars = hash_bars
+        self._cache: dict[str, CacheEntry] = {}
+        self._hits = 0
+        self._misses = 0
+
+    def _compute_hash(self, df: pd.DataFrame) -> str:
+        """Compute hash of last N bars for change detection"""
+        if df.empty:
+            return ""
+
+        # Get last N bars
+        recent = df.tail(self.hash_bars)
+
+        # Create a string representation of key columns
+        data_str = ""
+        for _, row in recent.iterrows():
+            data_str += f"{row['close']:.4f}|{row['volume']}|"
+
+        return hashlib.md5(data_str.encode()).hexdigest()[:16]
+
+    def get(self, symbol: str, df: pd.DataFrame) -> Optional[dict]:
+        """
+        Get cached indicators if available and valid.
+
+        Args:
+            symbol: Stock symbol
+            df: Current bar data (for hash comparison)
+
+        Returns:
+            Cached indicators dict if valid, None otherwise
+        """
+        if symbol not in self._cache:
+            self._misses += 1
+            return None
+
+        new_hash = self._compute_hash(df)
+        entry = self._cache[symbol]
+
+        if entry.is_valid(new_hash):
+            self._hits += 1
+            logger.debug(f"Cache HIT for {symbol}")
+            return entry.data
+
+        self._misses += 1
+        logger.debug(f"Cache MISS for {symbol} (data changed or expired)")
+        return None
+
+    def set(self, symbol: str, df: pd.DataFrame, indicators: dict) -> None:
+        """
+        Cache computed indicators.
+
+        Args:
+            symbol: Stock symbol
+            df: Bar data used to compute indicators
+            indicators: Computed indicator values
+        """
+        data_hash = self._compute_hash(df)
+        self._cache[symbol] = CacheEntry(
+            data=indicators,
+            data_hash=data_hash,
+            timestamp=datetime.now(),
+            ttl_seconds=self.ttl_seconds
+        )
+        logger.debug(f"Cached indicators for {symbol}")
+
+    def invalidate(self, symbol: Optional[str] = None) -> None:
+        """
+        Invalidate cache entries.
+
+        Args:
+            symbol: Specific symbol to invalidate, or None for all
+        """
+        if symbol:
+            if symbol in self._cache:
+                del self._cache[symbol]
+                logger.debug(f"Invalidated cache for {symbol}")
+        else:
+            self._cache.clear()
+            logger.debug("Cleared all indicator cache")
+
+    def get_stats(self) -> dict:
+        """Get cache statistics"""
+        total = self._hits + self._misses
+        hit_rate = (self._hits / total * 100) if total > 0 else 0
+        return {
+            'hits': self._hits,
+            'misses': self._misses,
+            'hit_rate': f"{hit_rate:.1f}%",
+            'entries': len(self._cache)
+        }
+
+
+# Global indicator cache instance
+indicator_cache = IndicatorCache(ttl_seconds=10, hash_bars=5)

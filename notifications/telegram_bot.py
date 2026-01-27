@@ -13,8 +13,8 @@ from telegram.ext import (
 )
 from loguru import logger
 
-from config.settings import settings
-from strategy.orb import TradeSignal, SignalType
+from config.settings import settings, SignalLevel
+from strategy.orb import TradeSignal, SignalType, orb_strategy
 from execution.orders import order_executor
 
 
@@ -55,6 +55,7 @@ class TradingTelegramBot:
             self.app.add_handler(CommandHandler("positions", self._cmd_positions))
             self.app.add_handler(CommandHandler("watchlist", self._cmd_watchlist))
             self.app.add_handler(CommandHandler("close", self._cmd_close_all))
+            self.app.add_handler(CommandHandler("level", self._cmd_level))
             self.app.add_handler(CommandHandler("help", self._cmd_help))
 
             # Handle text messages (for confirmations)
@@ -579,6 +580,66 @@ Buying Power: ${account.get('buying_power', 0):,.2f}
         results = order_executor.close_all_positions()
         await update.message.reply_text("✅ Todas las posiciones cerradas")
 
+    async def _cmd_level(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Handle /level command - view or change signal sensitivity level"""
+        args = context.args
+
+        if not args:
+            # Show current level and configuration
+            info = orb_strategy.get_signal_level_info()
+            message = f"""
+📊 *Nivel de Sensibilidad de Señales*
+
+*Nivel Actual:* {info['level']}
+
+*Configuración:*
+• Min Score: {info['min_signal_score']}/100
+• Min Volume: {info['min_relative_volume']}x
+• ORB Range: {info['min_orb_range_pct']}% - {info['max_orb_range_pct']}%
+• Último Trade: {info['latest_trade_time']}
+• Confirmar Cierre: {'Sí' if info['require_candle_close'] else 'No'}
+• RSI Sobrecompra: {info['rsi_overbought']}
+• RSI Sobreventa: {info['rsi_oversold']}
+• Sentiment Long: ≥ {info['min_sentiment_long']}
+• Sentiment Short: ≤ {info['max_sentiment_short']}
+
+*Cambiar nivel:*
+/level STRICT - Conservador (menos señales, alta confianza)
+/level MODERATE - Equilibrado (recomendado)
+/level RELAXED - Agresivo (más señales, mayor riesgo)
+            """
+            await update.message.reply_text(message.strip(), parse_mode="Markdown")
+        else:
+            # Try to change level
+            new_level = args[0].upper()
+
+            if new_level not in ['STRICT', 'MODERATE', 'RELAXED']:
+                await update.message.reply_text(
+                    "❌ Nivel inválido. Usa: STRICT, MODERATE, o RELAXED"
+                )
+                return
+
+            if orb_strategy.set_signal_level(new_level):
+                info = orb_strategy.get_signal_level_info()
+                message = f"""
+✅ *Nivel cambiado a {info['level']}*
+
+*Nueva configuración:*
+• Min Score: {info['min_signal_score']}/100
+• Min Volume: {info['min_relative_volume']}x
+• Último Trade: {info['latest_trade_time']}
+• ORB Range: {info['min_orb_range_pct']}% - {info['max_orb_range_pct']}%
+
+⚠️ El cambio aplica inmediatamente
+                """
+                await update.message.reply_text(message.strip(), parse_mode="Markdown")
+            else:
+                await update.message.reply_text("❌ Error al cambiar nivel")
+
     async def _cmd_help(
         self,
         update: Update,
@@ -591,10 +652,16 @@ Buying Power: ${account.get('buying_power', 0):,.2f}
 /status - Ver estado del bot y cuenta
 /positions - Ver posiciones abiertas
 /watchlist - Ver watchlist del día
+/level - Ver/cambiar sensibilidad de señales
 /start - Reanudar el bot
 /stop - Pausar el bot
 /close - Cerrar todas las posiciones
 /help - Ver esta ayuda
+
+*Niveles de sensibilidad:*
+/level STRICT - Conservador
+/level MODERATE - Equilibrado
+/level RELAXED - Agresivo
 
 *Respuestas a señales:*
 SI / YES - Ejecutar trade

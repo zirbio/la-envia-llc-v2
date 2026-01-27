@@ -2,10 +2,86 @@
 Configuration settings for Alpaca ORB Trading Bot
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class SignalLevel(Enum):
+    """Signal sensitivity levels for trading"""
+    STRICT = "STRICT"      # Conservative: High confidence signals only
+    MODERATE = "MODERATE"  # Balanced: Default setting
+    RELAXED = "RELAXED"    # Aggressive: More signals, higher risk
+
+
+@dataclass
+class SignalLevelConfig:
+    """Configuration parameters that vary by signal sensitivity level"""
+    # Signal quality
+    min_signal_score: float
+    min_relative_volume: float
+
+    # ORB range filters
+    min_orb_range_pct: float
+    max_orb_range_pct: float
+
+    # Trading window
+    latest_trade_time: str
+
+    # Confirmation requirements
+    require_candle_close: bool
+
+    # Sentiment thresholds
+    min_sentiment_long: float
+    max_sentiment_short: float
+
+    # RSI thresholds
+    rsi_overbought: int
+    rsi_oversold: int
+
+
+# Pre-defined signal level configurations
+SIGNAL_LEVEL_CONFIGS: dict[SignalLevel, SignalLevelConfig] = {
+    SignalLevel.STRICT: SignalLevelConfig(
+        min_signal_score=70.0,
+        min_relative_volume=1.5,
+        min_orb_range_pct=0.3,
+        max_orb_range_pct=2.0,
+        latest_trade_time="11:30",
+        require_candle_close=True,
+        min_sentiment_long=-0.3,
+        max_sentiment_short=0.3,
+        rsi_overbought=70,
+        rsi_oversold=30,
+    ),
+    SignalLevel.MODERATE: SignalLevelConfig(
+        min_signal_score=55.0,
+        min_relative_volume=1.2,
+        min_orb_range_pct=0.2,
+        max_orb_range_pct=2.5,
+        latest_trade_time="14:30",
+        require_candle_close=True,
+        min_sentiment_long=-0.5,
+        max_sentiment_short=0.5,
+        rsi_overbought=75,
+        rsi_oversold=25,
+    ),
+    SignalLevel.RELAXED: SignalLevelConfig(
+        min_signal_score=40.0,
+        min_relative_volume=1.0,
+        min_orb_range_pct=0.15,
+        max_orb_range_pct=3.0,
+        latest_trade_time="15:30",
+        require_candle_close=False,
+        min_sentiment_long=-0.7,
+        max_sentiment_short=0.7,
+        rsi_overbought=80,
+        rsi_oversold=20,
+    ),
+}
 
 
 @dataclass
@@ -66,22 +142,20 @@ class TradingConfig:
     max_price: float = 500.0
     min_avg_volume: int = 1_000_000
 
-    # Signal filters
-    min_relative_volume: float = 1.5
-    rsi_overbought: int = 70
-    rsi_oversold: int = 30
+    # Signal level - determines dynamic parameters below
+    # Load from environment, default to MODERATE
+    signal_level: SignalLevel = field(
+        default_factory=lambda: SignalLevel(
+            os.getenv("SIGNAL_LEVEL", "MODERATE").upper()
+        ) if os.getenv("SIGNAL_LEVEL", "MODERATE").upper() in [e.value for e in SignalLevel]
+        else SignalLevel.MODERATE
+    )
+
+    # Static signal filters (not affected by signal level)
     rsi_period: int = 14
 
     # Breakout confirmation (Phase 1)
     breakout_buffer_pct: float = 0.001  # 0.1% buffer above/below ORB levels
-    require_candle_close: bool = True   # Require candle close for confirmation
-
-    # ORB range filter (Phase 3)
-    min_orb_range_pct: float = 0.3   # Min 0.3% range (tradeable movement)
-    max_orb_range_pct: float = 2.0   # Max 2.0% range (achievable 2R target)
-
-    # Scoring system (Phase 4)
-    min_signal_score: float = 70.0   # Minimum score to trigger signal (0-100)
 
     # Execution (Phase 5)
     use_limit_entry: bool = True
@@ -91,7 +165,6 @@ class TradingConfig:
     # Risk management (Phase 6)
     max_daily_loss: float = 750.0    # 3% of $25k - circuit breaker
     max_consecutive_losses: int = 2  # Cooldown after consecutive losses
-    latest_trade_time: str = "11:30" # No new trades after this time
 
     # Watchlist
     max_watchlist_size: int = 10
@@ -104,6 +177,49 @@ class TradingConfig:
     trailing_ema_period: int = 9           # EMA9 for trailing
     trailing_bar_timeframe: int = 5        # 5-minute bars
     position_check_interval: int = 5       # Check positions every 5 seconds
+
+    # Monitoring intervals (for adaptive polling)
+    base_monitoring_interval: int = 10     # Base interval in seconds
+    min_monitoring_interval: int = 5       # Minimum when active
+    max_monitoring_interval: int = 30      # Maximum when quiet
+
+    @property
+    def signal_config(self) -> SignalLevelConfig:
+        """Get the active signal level configuration"""
+        return SIGNAL_LEVEL_CONFIGS[self.signal_level]
+
+    # Convenience properties that delegate to signal_config
+    @property
+    def min_signal_score(self) -> float:
+        return self.signal_config.min_signal_score
+
+    @property
+    def min_relative_volume(self) -> float:
+        return self.signal_config.min_relative_volume
+
+    @property
+    def min_orb_range_pct(self) -> float:
+        return self.signal_config.min_orb_range_pct
+
+    @property
+    def max_orb_range_pct(self) -> float:
+        return self.signal_config.max_orb_range_pct
+
+    @property
+    def latest_trade_time(self) -> str:
+        return self.signal_config.latest_trade_time
+
+    @property
+    def require_candle_close(self) -> bool:
+        return self.signal_config.require_candle_close
+
+    @property
+    def rsi_overbought(self) -> int:
+        return self.signal_config.rsi_overbought
+
+    @property
+    def rsi_oversold(self) -> int:
+        return self.signal_config.rsi_oversold
 
 
 @dataclass

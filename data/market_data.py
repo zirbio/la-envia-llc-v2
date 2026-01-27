@@ -405,6 +405,105 @@ class MarketDataClient:
             limit=limit
         )
 
+    def get_latest_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """
+        Get latest quotes for multiple symbols in a single API call.
+
+        More efficient than calling get_latest_quote() for each symbol
+        when checking multiple symbols in the watchlist.
+
+        Args:
+            symbols: List of stock symbols
+
+        Returns:
+            Dict mapping symbol to quote data (bid, ask, mid, etc.)
+        """
+        if not symbols:
+            return {}
+
+        try:
+            request = StockLatestQuoteRequest(symbol_or_symbols=symbols)
+            quotes = self.data_client.get_stock_latest_quote(request)
+
+            result = {}
+            for symbol in symbols:
+                if symbol in quotes:
+                    quote = quotes[symbol]
+                    result[symbol] = {
+                        'symbol': symbol,
+                        'bid': float(quote.bid_price),
+                        'ask': float(quote.ask_price),
+                        'mid': (float(quote.bid_price) + float(quote.ask_price)) / 2,
+                        'bid_size': int(quote.bid_size),
+                        'ask_size': int(quote.ask_size),
+                        'timestamp': quote.timestamp
+                    }
+
+            logger.debug(f"Fetched {len(result)}/{len(symbols)} quotes in batch")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error getting batch quotes: {e}")
+            return {}
+
+    def get_bars_batch(
+        self,
+        symbols: list[str],
+        timeframe: TimeFrame = TimeFrame.Minute,
+        limit: int = 50
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Get bars for multiple symbols in a single API call.
+
+        More efficient than calling get_bars() for each symbol
+        when building indicators for multiple symbols.
+
+        Args:
+            symbols: List of stock symbols
+            timeframe: Bar timeframe
+            limit: Maximum number of bars per symbol
+
+        Returns:
+            Dict mapping symbol to DataFrame with OHLCV data
+        """
+        if not symbols:
+            return {}
+
+        try:
+            start = datetime.now() - timedelta(days=5)
+
+            request = StockBarsRequest(
+                symbol_or_symbols=symbols,
+                timeframe=timeframe,
+                start=start,
+                limit=limit
+            )
+
+            bars = self.data_client.get_stock_bars(request)
+
+            result = {}
+            for symbol in symbols:
+                if symbol in bars.data and bars.data[symbol]:
+                    df = pd.DataFrame([{
+                        'timestamp': bar.timestamp,
+                        'open': float(bar.open),
+                        'high': float(bar.high),
+                        'low': float(bar.low),
+                        'close': float(bar.close),
+                        'volume': int(bar.volume),
+                        'vwap': float(bar.vwap) if bar.vwap else None
+                    } for bar in bars.data[symbol]])
+
+                    df.set_index('timestamp', inplace=True)
+                    result[symbol] = df
+
+            logger.debug(f"Fetched bars for {len(result)}/{len(symbols)} symbols in batch")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error getting batch bars: {e}")
+            return {}
+
 
 # Global client instance
 market_data = MarketDataClient()
