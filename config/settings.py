@@ -107,12 +107,28 @@ class TradingConfig:
 
 
 @dataclass
+class OneOffStrategiesConfig:
+    """Configuration for one-off strategies (on-demand, not automated)"""
+    # VWAP Mean Reversion
+    vwap_min_distance_pct: float = 0.02    # 2% minimum distance from VWAP
+    vwap_max_distance_pct: float = 0.03    # 3% maximum
+    vwap_rsi_oversold: int = 35
+    vwap_rsi_overbought: int = 65
+    vwap_min_rel_volume: float = 1.2
+    vwap_atr_max_pct: float = 0.025
+    vwap_stop_atr_mult: float = 1.5
+    vwap_time_stop_minutes: int = 45
+    vwap_min_score: float = 60.0
+
+
+@dataclass
 class Settings:
     """Main settings container"""
     alpaca: AlpacaConfig
     telegram: TelegramConfig
     trading: TradingConfig
     sentiment: SentimentConfig
+    oneoff: OneOffStrategiesConfig
 
     @classmethod
     def load(cls) -> "Settings":
@@ -120,7 +136,8 @@ class Settings:
             alpaca=AlpacaConfig(),
             telegram=TelegramConfig(),
             trading=TradingConfig(),
-            sentiment=SentimentConfig()
+            sentiment=SentimentConfig(),
+            oneoff=OneOffStrategiesConfig()
         )
 
 
