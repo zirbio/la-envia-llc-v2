@@ -72,7 +72,24 @@ Copy `.env.example` to `.env` and set:
 - Capital: $25,000 | Risk per trade: 2% | Max daily trades: 3
 - ORB period: 15 minutes | Min gap: 2% | Price range: $10-$500
 - Min premarket volume: 500K | Min avg daily volume: 1M
-- RSI overbought/oversold: 70/30 | Take profit ratio: 2:1
+- Take profit ratio: 2:1
+
+## Signal Levels
+
+The bot supports 3 configurable sensitivity levels via `SIGNAL_LEVEL` env var:
+
+| Parameter | STRICT | MODERATE (default) | RELAXED |
+|-----------|--------|-------------------|---------|
+| min_signal_score | 70 | 55 | 40 |
+| min_relative_volume | 1.5x | 1.2x | 1.0x |
+| min_orb_range_pct | 0.3% | 0.2% | 0.15% |
+| max_orb_range_pct | 2.0% | 2.5% | 3.0% |
+| RSI overbought/oversold | 70/30 | 75/25 | 80/20 |
+| sentiment long/short | -0.3/0.3 | -0.5/0.5 | -0.7/0.7 |
+| latest_trade_time | 11:30 | 14:30 | 15:30 |
+| require_candle_close | Yes | Yes | No |
+
+Change level via Telegram: `/level STRICT|MODERATE|RELAXED`
 
 ## Important Constraints
 

@@ -97,11 +97,14 @@ class ORBStrategy:
 
     Rules:
     - Calculate high/low of first N minutes (Opening Range)
-    - LONG: Price breaks above ORB high + price > VWAP + volume spike + RSI < 70 + MACD bullish
-    - SHORT: Price breaks below ORB low + price < VWAP + volume spike + RSI > 30 + MACD bearish
-    - Stop: Opposite side of ORB
+    - LONG: Price breaks above ORB high + price > VWAP + volume spike + RSI < overbought + MACD bullish + sentiment >= threshold
+    - SHORT: Price breaks below ORB low + price < VWAP + volume spike + RSI > oversold + MACD bearish + sentiment <= threshold
+    - Stop: Opposite side of ORB (or tighter ATR-based)
     - Target: 2:1 risk/reward ratio
     - Position size: Kelly Criterion (half-Kelly for safety)
+
+    Note: RSI, volume, and sentiment thresholds are configurable via signal levels
+    (STRICT, MODERATE, RELAXED). See config/settings.py for values per level.
     """
 
     def __init__(self):

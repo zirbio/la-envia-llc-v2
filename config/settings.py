@@ -110,8 +110,6 @@ class SentimentConfig:
     """Sentiment analysis configuration"""
     finnhub_api_key: str = os.getenv("FINNHUB_API_KEY", "")
     enabled: bool = os.getenv("SENTIMENT_ENABLED", "true").lower() == "true"
-    min_score_long: float = -0.3  # Minimum sentiment for long trades
-    max_score_short: float = 0.3  # Maximum sentiment for short trades
     cache_minutes: int = 30
 
 
