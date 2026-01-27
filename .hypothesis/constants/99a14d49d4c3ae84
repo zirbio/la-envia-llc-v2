@@ -1,0 +1,4 @@
+# file: /Users/silvio_requena/Code/la-envia-v2/data/indicators.py
+# hypothesis_version: 6.151.2
+
+[0.0, 1.5, 2.0, 100, 'atr', 'bb_lower', 'bb_middle', 'bb_upper', 'close', 'ema_20', 'ema_9', 'entries', 'high', 'hit_rate', 'hits', 'low', 'macd', 'macd_histogram', 'macd_signal', 'misses', 'prev_macd_histogram', 'prev_stoch_d', 'prev_stoch_k', 'rsi', 'stoch_d', 'stoch_k', 'volume', 'vwap']

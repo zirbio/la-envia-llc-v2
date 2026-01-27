@@ -1,0 +1,4 @@
+# file: /Users/silvio_requena/Code/la-envia-v2/data/market_data.py
+# hypothesis_version: 6.151.2
+
+[1.0, 100, 300, 390, 'ask', 'ask_size', 'bid', 'bid_size', 'close', 'current_price', 'gap_percent', 'high', 'hour', 'low', 'mid', 'minute', 'open', 'premarket_volume', 'prev_close', 'symbol', 'timestamp', 'volume', 'vwap']

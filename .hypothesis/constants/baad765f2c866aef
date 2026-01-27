@@ -1,0 +1,4 @@
+# file: /Users/silvio_requena/Code/la-envia-v2/strategy/orb.py
+# hypothesis_version: 6.151.2
+
+[-1.0, 0.0, 0.01, 0.02, 0.25, 0.5, 1.0, 1.2, 1.5, 2.0, 2.5, 100, 390, ':', 'Daily data reset', 'LONG', 'NONE', 'SHORT', 'avg_loss', 'avg_win', 'close', 'high', 'kelly_fraction', 'latest_trade_time', 'level', 'low', 'macd', 'macd_histogram', 'macd_signal', 'max_orb_range_pct', 'max_sentiment_short', 'min_orb_range_pct', 'min_relative_volume', 'min_sentiment_long', 'min_signal_score', 'no_close', 'prev_macd_histogram', 'require_candle_close', 'rsi', 'rsi_overbought', 'rsi_oversold', 'trade_count', 'vwap', 'win_rate', '○', '✓', '🔴', '🟢']

@@ -1,0 +1,4 @@
+# file: /Users/silvio_requena/Code/la-envia-v2/execution/orders.py
+# hypothesis_version: 6.151.2
+
+[0.0, 100, 120, '%H:%M:%S', '+', 'Cancelled all orders', 'Closed all positions', 'US/Eastern', 'Unable to get quote', 'all_closed', 'ask', 'bid', 'bracket', 'buy', 'buying_power', 'cash', 'closed', 'created_at', 'current_time', 'day_trade_count', 'equity', 'error', 'filled', 'filled_avg_price', 'filled_qty', 'id', 'is_market_open', 'is_open', 'is_postmarket', 'is_premarket', 'is_regular', 'long', 'next_close', 'next_open', 'pattern_day_trader', 'qty', 'quote', 'sell', 'short', 'side', 'status', 'stop_price', 'symbol', 'timestamp', 'type', '📊 *POSITIONS*\n', '📊 No open positions', '🔴', '🟢']

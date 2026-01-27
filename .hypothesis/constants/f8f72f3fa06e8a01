@@ -1,0 +1,4 @@
+# file: /Users/silvio_requena/Code/la-envia-v2/data/sentiment.py
+# hypothesis_version: 6.151.2
+
+[-0.3, 0.0, 0.3, 1.0, 200, '...', 'Alcista', 'Bajista', 'Neutral', 'advance', 'bearish', 'beat', 'below', 'boom', 'breakout', 'bullish', 'buy', 'climb', 'concern', 'crash', 'cut', 'decline', 'downgrade', 'downside', 'drop', 'exceeds', 'fail', 'fall', 'gain', 'growth', 'headline', 'high', 'jump', 'long', 'loss', 'low', 'miss', 'momentum', 'negative', 'optimistic', 'outperform', 'pessimistic', 'plunge', 'positive', 'profit', 'rally', 'record', 'recovery', 'rise', 'risk', 'sell', 'selloff', 'sink', 'slide', 'soar', 'strong', 'struggle', 'summary', 'surge', 'tumble', 'underperform', 'upgrade', 'upside', 'warning', 'weak', 'win', '🔴', '🟡', '🟢']
