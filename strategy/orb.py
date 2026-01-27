@@ -13,7 +13,7 @@ from data.market_data import market_data
 from data.indicators import (
     calculate_rsi, calculate_vwap, detect_volume_spike,
     calculate_macd, is_macd_bullish, is_macd_bearish,
-    calculate_atr, IndicatorCalculator
+    calculate_atr, IndicatorCalculator, indicator_cache
 )
 
 
@@ -97,11 +97,14 @@ class ORBStrategy:
 
     Rules:
     - Calculate high/low of first N minutes (Opening Range)
-    - LONG: Price breaks above ORB high + price > VWAP + volume spike + RSI < 70 + MACD bullish
-    - SHORT: Price breaks below ORB low + price < VWAP + volume spike + RSI > 30 + MACD bearish
-    - Stop: Opposite side of ORB
+    - LONG: Price breaks above ORB high + price > VWAP + volume spike + RSI < overbought + MACD bullish + sentiment >= threshold
+    - SHORT: Price breaks below ORB low + price < VWAP + volume spike + RSI > oversold + MACD bearish + sentiment <= threshold
+    - Stop: Opposite side of ORB (or tighter ATR-based)
     - Target: 2:1 risk/reward ratio
     - Position size: Kelly Criterion (half-Kelly for safety)
+
+    Note: RSI, volume, and sentiment thresholds are configurable via signal levels
+    (STRICT, MODERATE, RELAXED). See config/settings.py for values per level.
     """
 
     def __init__(self):
@@ -244,10 +247,15 @@ class ORBStrategy:
         if bars.empty:
             return None
 
-        # Calculate all indicators including MACD
-        indicator_calc = IndicatorCalculator(bars)
-        indicator_calc.add_all_indicators()
-        indicators = indicator_calc.get_latest_indicators()
+        # Try to get cached indicators first
+        indicators = indicator_cache.get(symbol, bars)
+        if indicators is None:
+            # Calculate all indicators including MACD
+            indicator_calc = IndicatorCalculator(bars)
+            indicator_calc.add_all_indicators()
+            indicators = indicator_calc.get_latest_indicators()
+            # Cache the results
+            indicator_cache.set(symbol, bars, indicators)
 
         current_vwap = indicators.get('vwap', 0)
         current_rsi = indicators.get('rsi', 50)
@@ -335,7 +343,7 @@ class ORBStrategy:
         c3 = rel_volume >= self.config.min_relative_volume
         c4 = rsi < self.config.rsi_overbought
         c5 = macd_bullish
-        c6 = sentiment >= settings.sentiment.min_score_long
+        c6 = sentiment >= self.config.signal_config.min_sentiment_long
 
         conditions = [c1, c2, c3, c4, c5, c6]
 
@@ -388,7 +396,7 @@ class ORBStrategy:
         c3 = rel_volume >= self.config.min_relative_volume
         c4 = rsi > self.config.rsi_oversold
         c5 = macd_bearish
-        c6 = sentiment <= settings.sentiment.max_score_short
+        c6 = sentiment <= self.config.signal_config.max_sentiment_short
 
         conditions = [c1, c2, c3, c4, c5, c6]
 
@@ -901,6 +909,65 @@ class ORBStrategy:
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
         logger.info("Daily data reset")
+
+    @property
+    def signal_level(self):
+        """Get current signal sensitivity level"""
+        return self.config.signal_level
+
+    def set_signal_level(self, level) -> bool:
+        """
+        Change signal sensitivity level at runtime
+
+        Args:
+            level: SignalLevel enum or string ('STRICT', 'MODERATE', 'RELAXED')
+
+        Returns:
+            True if level was changed successfully
+        """
+        from config.settings import SignalLevel, SIGNAL_LEVEL_CONFIGS
+
+        # Convert string to enum if needed
+        if isinstance(level, str):
+            try:
+                level = SignalLevel(level.upper())
+            except ValueError:
+                logger.error(f"Invalid signal level: {level}")
+                return False
+
+        if level not in SIGNAL_LEVEL_CONFIGS:
+            logger.error(f"Invalid signal level: {level}")
+            return False
+
+        old_level = self.config.signal_level
+        self.config.signal_level = level
+
+        logger.info(
+            f"Signal level changed: {old_level.value} -> {level.value}\n"
+            f"  min_signal_score: {self.config.min_signal_score}\n"
+            f"  min_relative_volume: {self.config.min_relative_volume}\n"
+            f"  latest_trade_time: {self.config.latest_trade_time}\n"
+            f"  min_orb_range_pct: {self.config.min_orb_range_pct}%"
+        )
+
+        return True
+
+    def get_signal_level_info(self) -> dict:
+        """Get current signal level and its configuration"""
+        config = self.config.signal_config
+        return {
+            'level': self.config.signal_level.value,
+            'min_signal_score': config.min_signal_score,
+            'min_relative_volume': config.min_relative_volume,
+            'min_orb_range_pct': config.min_orb_range_pct,
+            'max_orb_range_pct': config.max_orb_range_pct,
+            'latest_trade_time': config.latest_trade_time,
+            'require_candle_close': config.require_candle_close,
+            'min_sentiment_long': config.min_sentiment_long,
+            'max_sentiment_short': config.max_sentiment_short,
+            'rsi_overbought': config.rsi_overbought,
+            'rsi_oversold': config.rsi_oversold,
+        }
 
 
 # Global strategy instance

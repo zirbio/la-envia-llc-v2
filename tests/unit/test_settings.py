@@ -70,10 +70,10 @@ class TestTradingConfig:
         assert config.max_price == 500.0
         assert config.min_avg_volume == 1_000_000
 
-        # Signal filters
-        assert config.min_relative_volume == 1.5
-        assert config.rsi_overbought == 70
-        assert config.rsi_oversold == 30
+        # Signal filters (MODERATE defaults)
+        assert config.min_relative_volume == 1.2
+        assert config.rsi_overbought == 75
+        assert config.rsi_oversold == 25
 
     def test_trading_config_custom_values(self):
         """TradingConfig should accept custom values."""
@@ -115,8 +115,7 @@ class TestSentimentConfig:
         """SentimentConfig should have correct default values."""
         config = SentimentConfig(finnhub_api_key="", enabled=True)
 
-        assert config.min_score_long == -0.3
-        assert config.max_score_short == 0.3
+        # Note: min_score_long and max_score_short moved to SignalLevelConfig
         assert config.cache_minutes == 30
 
 

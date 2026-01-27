@@ -409,3 +409,294 @@ def create_ohlcv_bar(open_price: float, high: float, low: float, close: float, v
         'close': close,
         'volume': volume
     }
+
+
+# ============================================================================
+# Breakout Scenario Fixtures (for diagnostic/unit tests)
+# ============================================================================
+
+@pytest.fixture
+def breakout_long_scenario():
+    """
+    Scenario data for a valid LONG breakout signal.
+    All conditions should pass with MODERATE level.
+    """
+    from strategy.orb import OpeningRange
+
+    orb = OpeningRange(
+        symbol="TEST",
+        high=100.00,
+        low=98.00,
+        range_size=2.00,
+        vwap=99.00,
+        timestamp=datetime.now()
+    )
+
+    return {
+        'orb': orb,
+        'price': 100.50,           # Above ORB high + buffer
+        'vwap': 99.50,             # Price > VWAP
+        'rsi': 55.0,               # Not overbought (< 75)
+        'rel_volume': 2.0,         # Above min (1.2)
+        'macd_histogram': 0.15,    # Positive
+        'prev_macd_histogram': 0.10,  # Growing
+        'sentiment': 0.2,          # Above min_sentiment_long (-0.5)
+        'last_candle_close': 100.30,  # Above breakout level
+    }
+
+
+@pytest.fixture
+def breakout_short_scenario():
+    """
+    Scenario data for a valid SHORT breakout signal.
+    All conditions should pass with MODERATE level.
+    """
+    from strategy.orb import OpeningRange
+
+    orb = OpeningRange(
+        symbol="TEST",
+        high=100.00,
+        low=98.00,
+        range_size=2.00,
+        vwap=99.00,
+        timestamp=datetime.now()
+    )
+
+    return {
+        'orb': orb,
+        'price': 97.50,            # Below ORB low - buffer
+        'vwap': 99.00,             # Price < VWAP
+        'rsi': 45.0,               # Not oversold (> 25)
+        'rel_volume': 2.0,         # Above min (1.2)
+        'macd_histogram': -0.15,   # Negative
+        'prev_macd_histogram': -0.10,  # Falling (more negative)
+        'sentiment': -0.2,         # Below max_sentiment_short (0.5)
+        'last_candle_close': 97.70,  # Below breakout level
+    }
+
+
+@pytest.fixture
+def false_breakout_scenario():
+    """
+    Scenario where price breaks ORB but other conditions fail.
+    This should NOT generate a signal.
+    """
+    from strategy.orb import OpeningRange
+
+    orb = OpeningRange(
+        symbol="TEST",
+        high=100.00,
+        low=98.00,
+        range_size=2.00,
+        vwap=99.00,
+        timestamp=datetime.now()
+    )
+
+    return {
+        'orb': orb,
+        'price': 100.50,           # Above ORB high (breakout)
+        'vwap': 101.00,            # Price < VWAP (FAIL)
+        'rsi': 55.0,
+        'rel_volume': 1.0,         # Below min (1.2) (FAIL)
+        'macd_histogram': -0.05,   # Negative (FAIL for LONG)
+        'prev_macd_histogram': -0.02,
+        'sentiment': -0.6,         # Below min_sentiment_long (FAIL)
+        'last_candle_close': 100.30,
+    }
+
+
+@pytest.fixture
+def low_volume_scenario():
+    """
+    Scenario where volume is below hard floor (1.2x).
+    Should fail early in _check_breakout_with_scoring.
+    """
+    from strategy.orb import OpeningRange
+
+    orb = OpeningRange(
+        symbol="TEST",
+        high=100.00,
+        low=98.00,
+        range_size=2.00,
+        vwap=99.00,
+        timestamp=datetime.now()
+    )
+
+    return {
+        'orb': orb,
+        'price': 100.50,
+        'vwap': 99.50,
+        'rsi': 55.0,
+        'rel_volume': 1.1,         # Below hard floor (1.2)
+        'macd_histogram': 0.15,
+        'prev_macd_histogram': 0.10,
+        'sentiment': 0.2,
+        'last_candle_close': 100.30,
+    }
+
+
+@pytest.fixture
+def borderline_score_scenario():
+    """
+    Scenario where signal score is just at the threshold.
+    Useful for testing score boundaries.
+    """
+    from strategy.orb import OpeningRange
+
+    orb = OpeningRange(
+        symbol="TEST",
+        high=100.00,
+        low=98.00,
+        range_size=2.00,
+        vwap=99.00,
+        timestamp=datetime.now()
+    )
+
+    return {
+        'orb': orb,
+        'price': 100.20,           # Just above ORB + buffer
+        'vwap': 99.90,             # Barely above VWAP
+        'rsi': 50.0,               # Middle
+        'rel_volume': 1.3,         # Just above floor
+        'macd_histogram': 0.05,    # Weak positive
+        'prev_macd_histogram': 0.04,
+        'sentiment': 0.0,          # Neutral
+        'last_candle_close': 100.15,
+    }
+
+
+# ============================================================================
+# OHLCV DataFrame Generators for Testing
+# ============================================================================
+
+@pytest.fixture
+def ohlcv_with_macd_crossover():
+    """
+    DataFrame with a clear MACD bullish crossover.
+    Histogram goes from negative to positive.
+    """
+    np.random.seed(123)
+    n_bars = 50
+
+    # Create a price pattern with a dip then recovery (causes MACD crossover)
+    base_price = 100.0
+    prices = np.concatenate([
+        np.linspace(100, 95, 20),   # Decline
+        np.linspace(95, 105, 30),   # Recovery
+    ])
+
+    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1min')
+
+    return pd.DataFrame({
+        'open': prices - 0.2,
+        'high': prices + 0.5,
+        'low': prices - 0.5,
+        'close': prices,
+        'volume': [1_000_000] * n_bars
+    }, index=dates)
+
+
+@pytest.fixture
+def ohlcv_with_macd_bearish():
+    """
+    DataFrame with a clear MACD bearish signal.
+    Histogram negative and falling.
+    """
+    np.random.seed(456)
+    n_bars = 50
+
+    # Create a price pattern with a rise then decline
+    prices = np.concatenate([
+        np.linspace(100, 110, 20),   # Rise
+        np.linspace(110, 95, 30),    # Decline
+    ])
+
+    dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1min')
+
+    return pd.DataFrame({
+        'open': prices + 0.2,
+        'high': prices + 0.5,
+        'low': prices - 0.5,
+        'close': prices,
+        'volume': [1_000_000] * n_bars
+    }, index=dates)
+
+
+# ============================================================================
+# Signal Level Fixtures
+# ============================================================================
+
+@pytest.fixture
+def strict_trading_config():
+    """TradingConfig with STRICT signal level."""
+    from config.settings import TradingConfig, SignalLevel
+
+    config = TradingConfig()
+    config.signal_level = SignalLevel.STRICT
+    return config
+
+
+@pytest.fixture
+def moderate_trading_config():
+    """TradingConfig with MODERATE signal level (default)."""
+    from config.settings import TradingConfig, SignalLevel
+
+    config = TradingConfig()
+    config.signal_level = SignalLevel.MODERATE
+    return config
+
+
+@pytest.fixture
+def relaxed_trading_config():
+    """TradingConfig with RELAXED signal level."""
+    from config.settings import TradingConfig, SignalLevel
+
+    config = TradingConfig()
+    config.signal_level = SignalLevel.RELAXED
+    return config
+
+
+# ============================================================================
+# ORB Strategy Fixtures with Different Configurations
+# ============================================================================
+
+@pytest.fixture
+def orb_strategy_strict(strict_trading_config):
+    """ORBStrategy with STRICT signal level."""
+    from unittest.mock import patch
+    from strategy.orb import ORBStrategy
+    from config.settings import SentimentConfig
+
+    with patch('strategy.orb.settings') as mock_settings:
+        mock_settings.trading = strict_trading_config
+        mock_settings.sentiment = SentimentConfig(finnhub_api_key="", enabled=False)
+        strategy = ORBStrategy()
+    return strategy
+
+
+@pytest.fixture
+def orb_strategy_moderate(moderate_trading_config):
+    """ORBStrategy with MODERATE signal level."""
+    from unittest.mock import patch
+    from strategy.orb import ORBStrategy
+    from config.settings import SentimentConfig
+
+    with patch('strategy.orb.settings') as mock_settings:
+        mock_settings.trading = moderate_trading_config
+        mock_settings.sentiment = SentimentConfig(finnhub_api_key="", enabled=False)
+        strategy = ORBStrategy()
+    return strategy
+
+
+@pytest.fixture
+def orb_strategy_relaxed(relaxed_trading_config):
+    """ORBStrategy with RELAXED signal level."""
+    from unittest.mock import patch
+    from strategy.orb import ORBStrategy
+    from config.settings import SentimentConfig
+
+    with patch('strategy.orb.settings') as mock_settings:
+        mock_settings.trading = relaxed_trading_config
+        mock_settings.sentiment = SentimentConfig(finnhub_api_key="", enabled=False)
+        strategy = ORBStrategy()
+    return strategy

@@ -41,15 +41,18 @@ class TestCalculateOpeningRange:
 
     @pytest.fixture
     def orb_bars(self):
-        """Create sample bars for ORB calculation (20 bars, enough for 15-min ORB)."""
+        """Create sample bars for ORB calculation (20 bars, enough for 15-min ORB).
+
+        ORB range is designed to be ~1% which passes MODERATE filters (0.2%-2.5%).
+        """
         n_bars = 20
         dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1min')
 
         return pd.DataFrame({
             'open': [100.0] * n_bars,
-            'high': [100.0 + i * 0.1 for i in range(n_bars)],  # Gradually increasing high
-            'low': [99.0 - i * 0.05 for i in range(n_bars)],   # Gradually decreasing low
-            'close': [99.5 + i * 0.05 for i in range(n_bars)],
+            'high': [100.0 + i * 0.02 for i in range(n_bars)],  # Gradually increasing high
+            'low': [99.5 - i * 0.01 for i in range(n_bars)],    # Gradually decreasing low
+            'close': [99.75 + i * 0.01 for i in range(n_bars)],
             'volume': [1_000_000] * n_bars
         }, index=dates)
 
@@ -188,7 +191,7 @@ class TestLongBreakoutConditions:
             orb=orb,
             vwap=149.00,
             rsi=55.0,
-            rel_volume=1.0,    # BELOW min (1.5)
+            rel_volume=1.1,    # BELOW min (1.2 for MODERATE)
             macd_bullish=True,
             sentiment=0.2
         )
@@ -203,7 +206,7 @@ class TestLongBreakoutConditions:
             price=151.00,
             orb=orb,
             vwap=149.00,
-            rsi=75.0,          # ABOVE overbought (70)
+            rsi=76.0,          # ABOVE overbought (75 for MODERATE)
             rel_volume=2.0,
             macd_bullish=True,
             sentiment=0.2
@@ -238,7 +241,7 @@ class TestLongBreakoutConditions:
             rsi=55.0,
             rel_volume=2.0,
             macd_bullish=True,
-            sentiment=-0.5     # BELOW min (-0.3)
+            sentiment=-0.6     # BELOW min (-0.5 for MODERATE)
         )
 
         assert result is False
@@ -325,7 +328,7 @@ class TestShortBreakoutConditions:
             price=147.00,
             orb=orb,
             vwap=149.00,
-            rsi=25.0,          # BELOW oversold (30)
+            rsi=24.0,          # BELOW oversold (25 for MODERATE)
             rel_volume=2.0,
             macd_bearish=True,
             sentiment=-0.2
@@ -344,7 +347,7 @@ class TestShortBreakoutConditions:
             rsi=45.0,
             rel_volume=2.0,
             macd_bearish=True,
-            sentiment=0.5      # ABOVE max (0.3)
+            sentiment=0.6      # ABOVE max (0.5 for MODERATE)
         )
 
         assert result is False
@@ -374,7 +377,7 @@ class TestShortBreakoutConditions:
             orb=orb,
             vwap=149.00,
             rsi=45.0,
-            rel_volume=1.2,    # BELOW min (1.5)
+            rel_volume=1.1,    # BELOW min (1.2 for MODERATE)
             macd_bearish=True,
             sentiment=-0.2
         )
@@ -467,52 +470,60 @@ class TestTradeSignalCreation:
 
     def test_create_long_signal(self, orb_strategy, sample_opening_range):
         """LONG signal should be created with correct values."""
-        signal = orb_strategy._create_long_signal(
-            symbol="AAPL",
-            entry_price=151.00,
-            orb=sample_opening_range,
-            vwap=149.50,
-            rsi=55.0,
-            rel_volume=2.0,
-            macd=0.5,
-            macd_signal=0.3,
-            macd_histogram=0.2,
-            sentiment=0.3
-        )
+        with patch('strategy.orb.market_data') as mock_market_data:
+            # Return empty bars so hybrid stop falls back to ORB-based stop
+            mock_market_data.get_bars.return_value = pd.DataFrame()
 
-        assert isinstance(signal, TradeSignal)
-        assert signal.symbol == "AAPL"
-        assert signal.signal_type == SignalType.LONG
-        assert signal.entry_price == 151.00
-        assert signal.stop_loss == sample_opening_range.low  # Stop at ORB low
-        assert signal.take_profit > signal.entry_price  # Target above entry
-        assert signal.position_size > 0
-        assert signal.rsi == 55.0
-        assert signal.sentiment_score == 0.3
+            signal = orb_strategy._create_long_signal(
+                symbol="AAPL",
+                entry_price=151.00,
+                orb=sample_opening_range,
+                vwap=149.50,
+                rsi=55.0,
+                rel_volume=2.0,
+                macd=0.5,
+                macd_signal=0.3,
+                macd_histogram=0.2,
+                sentiment=0.3
+            )
+
+            assert isinstance(signal, TradeSignal)
+            assert signal.symbol == "AAPL"
+            assert signal.signal_type == SignalType.LONG
+            assert signal.entry_price == 151.00
+            assert signal.stop_loss == sample_opening_range.low  # Stop at ORB low
+            assert signal.take_profit > signal.entry_price  # Target above entry
+            assert signal.position_size > 0
+            assert signal.rsi == 55.0
+            assert signal.sentiment_score == 0.3
 
     def test_create_short_signal(self, orb_strategy, sample_opening_range):
         """SHORT signal should be created with correct values."""
-        signal = orb_strategy._create_short_signal(
-            symbol="AAPL",
-            entry_price=147.00,
-            orb=sample_opening_range,
-            vwap=149.50,
-            rsi=45.0,
-            rel_volume=2.0,
-            macd=-0.5,
-            macd_signal=-0.3,
-            macd_histogram=-0.2,
-            sentiment=-0.3
-        )
+        with patch('strategy.orb.market_data') as mock_market_data:
+            # Return empty bars so hybrid stop falls back to ORB-based stop
+            mock_market_data.get_bars.return_value = pd.DataFrame()
 
-        assert isinstance(signal, TradeSignal)
-        assert signal.symbol == "AAPL"
-        assert signal.signal_type == SignalType.SHORT
-        assert signal.entry_price == 147.00
-        assert signal.stop_loss == sample_opening_range.high  # Stop at ORB high
-        assert signal.take_profit < signal.entry_price  # Target below entry
-        assert signal.position_size > 0
-        assert signal.sentiment_score == -0.3
+            signal = orb_strategy._create_short_signal(
+                symbol="AAPL",
+                entry_price=147.00,
+                orb=sample_opening_range,
+                vwap=149.50,
+                rsi=45.0,
+                rel_volume=2.0,
+                macd=-0.5,
+                macd_signal=-0.3,
+                macd_histogram=-0.2,
+                sentiment=-0.3
+            )
+
+            assert isinstance(signal, TradeSignal)
+            assert signal.symbol == "AAPL"
+            assert signal.signal_type == SignalType.SHORT
+            assert signal.entry_price == 147.00
+            assert signal.stop_loss == sample_opening_range.high  # Stop at ORB high
+            assert signal.take_profit < signal.entry_price  # Target below entry
+            assert signal.position_size > 0
+            assert signal.sentiment_score == -0.3
 
 
 # ============================================================================

@@ -211,10 +211,11 @@ class PremarketScanner:
                         candidate.sentiment_score = sent.score
                         candidate.sentiment_news_count = sent.news_count
 
-                        # Set label (in Spanish) using settings thresholds
-                        if sent.score >= self.sentiment_config.max_score_short:
+                        # Set label (in Spanish) using signal level thresholds
+                        signal_config = settings.trading.signal_config
+                        if sent.score >= signal_config.max_sentiment_short:
                             candidate.sentiment_label = "Alcista"
-                        elif sent.score <= self.sentiment_config.min_score_long:
+                        elif sent.score <= signal_config.min_sentiment_long:
                             candidate.sentiment_label = "Bajista"
                         else:
                             candidate.sentiment_label = "Neutral"
