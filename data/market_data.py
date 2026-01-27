@@ -429,13 +429,17 @@ class MarketDataClient:
             for symbol in symbols:
                 if symbol in quotes:
                     quote = quotes[symbol]
+                    bid = float(quote.bid_price) if quote.bid_price else 0.0
+                    ask = float(quote.ask_price) if quote.ask_price else 0.0
+                    # Avoid division by zero during market halts or for illiquid stocks
+                    mid = (bid + ask) / 2 if (bid + ask) > 0 else 0.0
                     result[symbol] = {
                         'symbol': symbol,
-                        'bid': float(quote.bid_price),
-                        'ask': float(quote.ask_price),
-                        'mid': (float(quote.bid_price) + float(quote.ask_price)) / 2,
-                        'bid_size': int(quote.bid_size),
-                        'ask_size': int(quote.ask_size),
+                        'bid': bid,
+                        'ask': ask,
+                        'mid': mid,
+                        'bid_size': int(quote.bid_size) if quote.bid_size else 0,
+                        'ask_size': int(quote.ask_size) if quote.ask_size else 0,
                         'timestamp': quote.timestamp
                     }
 

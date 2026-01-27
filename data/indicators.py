@@ -440,26 +440,77 @@ class IndicatorCache:
 
     Stores computed indicators per symbol with TTL. Uses hash of recent
     bar data to detect changes and invalidate cache.
+
+    Features:
+    - TTL-based expiration (default 10s to match monitoring interval)
+    - Hash-based change detection (last 5 bars for trend continuity)
+    - Max size limit to prevent unbounded memory growth
+    - Automatic purging of expired entries
     """
 
-    def __init__(self, ttl_seconds: int = 10, hash_bars: int = 5):
+    # Default max entries (50 symbols * 2 for safety margin)
+    DEFAULT_MAX_SIZE = 100
+
+    def __init__(self, ttl_seconds: int = 10, hash_bars: int = 5, max_size: int = None):
         """
         Initialize indicator cache.
 
         Args:
-            ttl_seconds: Time-to-live for cache entries
-            hash_bars: Number of recent bars to hash for change detection
+            ttl_seconds: Time-to-live for cache entries (10s matches base monitoring interval)
+            hash_bars: Number of recent bars to hash for change detection (5 bars for trend)
+            max_size: Maximum cache entries before purging oldest (default 100)
         """
         self.ttl_seconds = ttl_seconds
         self.hash_bars = hash_bars
+        self.max_size = max_size or self.DEFAULT_MAX_SIZE
         self._cache: dict[str, CacheEntry] = {}
         self._hits = 0
         self._misses = 0
+        self._purge_count = 0  # Track purge operations for stats
+
+    def _purge_expired(self) -> int:
+        """
+        Remove expired entries from cache.
+
+        Returns:
+            Number of entries purged
+        """
+        now = datetime.now()
+        expired_symbols = [
+            symbol for symbol, entry in self._cache.items()
+            if now - entry.timestamp > timedelta(seconds=entry.ttl_seconds)
+        ]
+        for symbol in expired_symbols:
+            del self._cache[symbol]
+
+        if expired_symbols:
+            self._purge_count += len(expired_symbols)
+            logger.debug(f"Purged {len(expired_symbols)} expired cache entries")
+
+        return len(expired_symbols)
+
+    def _enforce_max_size(self) -> None:
+        """Remove oldest entries if cache exceeds max_size"""
+        if len(self._cache) <= self.max_size:
+            return
+
+        # Sort by timestamp (oldest first) and remove excess
+        sorted_entries = sorted(
+            self._cache.items(),
+            key=lambda x: x[1].timestamp
+        )
+        entries_to_remove = len(self._cache) - self.max_size
+        for symbol, _ in sorted_entries[:entries_to_remove]:
+            del self._cache[symbol]
+
+        self._purge_count += entries_to_remove
+        logger.debug(f"Evicted {entries_to_remove} oldest cache entries (max_size={self.max_size})")
 
     def _compute_hash(self, df: pd.DataFrame) -> str:
         """Compute hash of last N bars for change detection"""
         if df.empty:
-            return ""
+            # Return symbol-agnostic empty marker to avoid cross-symbol collisions
+            return "empty_df"
 
         # Get last N bars
         recent = df.tail(self.hash_bars)
@@ -502,11 +553,17 @@ class IndicatorCache:
         """
         Cache computed indicators.
 
+        Automatically purges expired entries and enforces max_size limit.
+
         Args:
             symbol: Stock symbol
             df: Bar data used to compute indicators
             indicators: Computed indicator values
         """
+        # Purge expired entries periodically (every 10 sets to reduce overhead)
+        if len(self._cache) > 0 and len(self._cache) % 10 == 0:
+            self._purge_expired()
+
         data_hash = self._compute_hash(df)
         self._cache[symbol] = CacheEntry(
             data=indicators,
@@ -514,6 +571,10 @@ class IndicatorCache:
             timestamp=datetime.now(),
             ttl_seconds=self.ttl_seconds
         )
+
+        # Enforce max size limit
+        self._enforce_max_size()
+
         logger.debug(f"Cached indicators for {symbol}")
 
     def invalidate(self, symbol: Optional[str] = None) -> None:
@@ -532,16 +593,26 @@ class IndicatorCache:
             logger.debug("Cleared all indicator cache")
 
     def get_stats(self) -> dict:
-        """Get cache statistics"""
+        """
+        Get cache statistics.
+
+        Returns:
+            Dict with hits, misses, hit_rate, entries, purged counts
+        """
         total = self._hits + self._misses
         hit_rate = (self._hits / total * 100) if total > 0 else 0
         return {
             'hits': self._hits,
             'misses': self._misses,
             'hit_rate': f"{hit_rate:.1f}%",
-            'entries': len(self._cache)
+            'entries': len(self._cache),
+            'max_size': self.max_size,
+            'purged': self._purge_count
         }
 
 
 # Global indicator cache instance
-indicator_cache = IndicatorCache(ttl_seconds=10, hash_bars=5)
+# - ttl_seconds=10: Matches base monitoring interval to avoid stale indicators
+# - hash_bars=5: Uses last 5 bars for trend continuity without excessive computation
+# - max_size=100: Supports 50 symbols with 2x safety margin for premarket scans
+indicator_cache = IndicatorCache(ttl_seconds=10, hash_bars=5, max_size=100)
