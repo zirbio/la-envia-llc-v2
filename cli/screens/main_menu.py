@@ -28,6 +28,14 @@ from execution.orders import order_executor
 
 
 EST = pytz.timezone('US/Eastern')
+MADRID = pytz.timezone('Europe/Madrid')
+
+
+def get_current_dual_time() -> str:
+    """Get current time in both EST and Madrid timezones."""
+    now_est = datetime.now(EST)
+    now_madrid = now_est.astimezone(MADRID)
+    return f"{now_est.strftime('%H:%M')} EST / {now_madrid.strftime('%H:%M')} Madrid"
 
 
 class MainMenuScreen:
@@ -66,11 +74,14 @@ class MainMenuScreen:
         except Exception:
             equity = 0
 
+        now_est = datetime.now(EST)
+        now_madrid = now_est.astimezone(MADRID)
+
         return {
             'market_status': market_status,
             'connection_status': conn_status,
             'equity': equity,
-            'time': datetime.now(EST).strftime('%H:%M:%S EST')
+            'time': f"{now_est.strftime('%H:%M:%S')} EST / {now_madrid.strftime('%H:%M:%S')} Madrid"
         }
 
     def display(self) -> str:
@@ -85,18 +96,20 @@ class MainMenuScreen:
         info = self.get_status_info()
         market_text, _ = info['market_status']
         conn_text, _ = info['connection_status']
+        current_time = get_current_dual_time()
 
-        print("\n" + "=" * 50)
-        print("       ALPACA ORB TRADING BOT")
-        print("=" * 50)
+        print("\n" + "=" * 60)
+        print("           ALPACA ORB TRADING BOT")
+        print("=" * 60)
         print(f"[Status: Mercado {market_text} | Conexión: {conn_text}]")
+        print(f"⏰ Hora actual: {current_time}")
         print()
         print("SELECCIONE MODO DE TRADING:")
-        print("1. Regular Hours (9:30-16:00 EST) <- Default")
-        print("2. Premarket (8:00-9:25 EST)")
-        print("3. Postmarket (16:05-18:00 EST)")
-        print("4. Todas las Sesiones (8:00-18:00 EST)")
-        print("-" * 40)
+        print("1. Regular Hours  9:30-16:00 EST (15:30-22:00 Madrid) <- Default")
+        print("2. Premarket      8:00-9:25 EST  (14:00-15:25 Madrid)")
+        print("3. Postmarket     16:05-18:00 EST (22:05-00:00 Madrid)")
+        print("4. Todas Sesiones 8:00-18:00 EST (14:00-00:00 Madrid)")
+        print("-" * 60)
         print("5. Configuración avanzada")
         print("6. Estado de cuenta")
         print("7. Salir")
@@ -137,21 +150,24 @@ class MainMenuScreen:
         )
         table.add_column("Opción", style="cyan", width=4)
         table.add_column("Descripción", style="white")
-        table.add_column("Horario", style="dim", justify="right")
+        table.add_column("Horario EST", style="dim", justify="right")
+        table.add_column("Horario Madrid", style="dim cyan", justify="right")
 
         # Add Default marker to option 1
-        table.add_row("1", "Regular Hours [bold yellow]<- Default[/]", "9:30 - 16:00 EST")
-        table.add_row("2", "Premarket", "8:00 - 9:25 EST")
-        table.add_row("3", "Postmarket", "16:05 - 18:00 EST")
-        table.add_row("4", "Todas las Sesiones", "8:00 - 18:00 EST")
-        table.add_row("", "", "")
-        table.add_row("5", "Configuración avanzada", "")
-        table.add_row("6", "Estado de cuenta", "")
-        table.add_row("7", "Salir", "")
+        table.add_row("1", "Regular Hours [bold yellow]<- Default[/]", "9:30 - 16:00", "15:30 - 22:00")
+        table.add_row("2", "Premarket", "8:00 - 9:25", "14:00 - 15:25")
+        table.add_row("3", "Postmarket", "16:05 - 18:00", "22:05 - 00:00")
+        table.add_row("4", "Todas las Sesiones", "8:00 - 18:00", "14:00 - 00:00")
+        table.add_row("", "", "", "")
+        table.add_row("5", "Configuración avanzada", "", "")
+        table.add_row("6", "Estado de cuenta", "", "")
+        table.add_row("7", "Salir", "", "")
 
+        current_time = get_current_dual_time()
         menu_panel = Panel(
             table,
             title="[bold]SELECCIONE MODO DE TRADING[/bold]",
+            subtitle=f"[dim]⏰ Hora actual: {current_time}[/dim]",
             border_style="blue",
             padding=(1, 1)
         )

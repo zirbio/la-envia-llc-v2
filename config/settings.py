@@ -314,11 +314,11 @@ class TradingConfig:
     # Trading hours (EST)
     premarket_start: str = "06:00"
     market_open: str = "09:30"
-    orb_end: str = "09:45"  # Opening Range period ends
+    orb_end: str = "09:35"  # Opening Range period ends (5 min after open)
     trading_end: str = "16:00"  # Stop trading, close positions (market close)
 
     # Opening Range
-    orb_period_minutes: int = 15
+    orb_period_minutes: int = 5  # Reduced from 15 for faster signal detection
 
     # Scanner filters
     min_gap_percent: float = 2.0
@@ -373,9 +373,9 @@ class TradingConfig:
     position_check_interval: int = 5       # Check positions every 5 seconds
 
     # Monitoring intervals (for adaptive polling)
-    base_monitoring_interval: int = 10     # Base interval in seconds
-    min_monitoring_interval: int = 5       # Minimum when active
-    max_monitoring_interval: int = 30      # Maximum when quiet
+    base_monitoring_interval: int = 5      # Base interval in seconds (reduced from 10)
+    min_monitoring_interval: int = 2       # Minimum when active (reduced from 5)
+    max_monitoring_interval: int = 10      # Maximum when quiet (reduced from 30)
 
     # Show all signals mode (default: True - show all signals with classification)
     # Set to False to restore previous behavior (only show signals meeting threshold)

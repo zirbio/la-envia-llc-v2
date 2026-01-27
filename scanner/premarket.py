@@ -12,6 +12,30 @@ from data.sentiment import sentiment_analyzer, SentimentResult
 
 
 @dataclass
+class PremktContext:
+    """Premarket context data for context score calculation"""
+    symbol: str
+    premarket_high: float
+    premarket_low: float
+    prev_close: float
+    open_price: float = 0.0  # Updated at 9:30
+
+    def has_resistance_above(self, price: float, threshold_pct: float = 0.003) -> bool:
+        """Check if premarket high is close above price (resistance)"""
+        if self.premarket_high <= price:
+            return False
+        distance_pct = (self.premarket_high - price) / price
+        return distance_pct <= threshold_pct
+
+    def has_support_below(self, price: float, threshold_pct: float = 0.003) -> bool:
+        """Check if premarket low is close below price (support)"""
+        if self.premarket_low >= price:
+            return False
+        distance_pct = (price - self.premarket_low) / price
+        return distance_pct <= threshold_pct
+
+
+@dataclass
 class ScanResult:
     """Result of scanning a single symbol"""
     symbol: str
@@ -24,6 +48,9 @@ class ScanResult:
     sentiment_score: float = 0.0
     sentiment_label: str = "Neutral"  # Alcista, Bajista, Neutral
     sentiment_news_count: int = 0
+    # Premarket context for context score
+    premarket_high: float = 0.0
+    premarket_low: float = 0.0
 
     def __str__(self) -> str:
         direction = "+" if self.gap_percent > 0 else ""
@@ -41,6 +68,8 @@ class PremarketScanner:
         self.config = settings.trading
         self.sentiment_config = settings.sentiment
         self.candidates: list[ScanResult] = []
+        # Cache for premarket context (used by strategy/orb.py for context score)
+        self.premarket_context: dict[str, PremktContext] = {}
 
         # Configure sentiment analyzer with API key
         if self.sentiment_config.finnhub_api_key:
@@ -97,6 +126,19 @@ class PremarketScanner:
                 price=price
             )
 
+            # Get premarket High/Low for context score
+            premarket_high = premarket.get('premarket_high', price)
+            premarket_low = premarket.get('premarket_low', price)
+
+            # Cache premarket context for later use in strategy
+            self.premarket_context[symbol] = PremktContext(
+                symbol=symbol,
+                premarket_high=premarket_high,
+                premarket_low=premarket_low,
+                prev_close=premarket['prev_close'],
+                open_price=0.0  # Will be updated at 9:30
+            )
+
             return ScanResult(
                 symbol=symbol,
                 prev_close=premarket['prev_close'],
@@ -104,7 +146,9 @@ class PremarketScanner:
                 gap_percent=premarket['gap_percent'],
                 premarket_volume=pm_volume,
                 avg_daily_volume=avg_volume,
-                score=score
+                score=score,
+                premarket_high=premarket_high,
+                premarket_low=premarket_low
             )
 
         except Exception as e:
@@ -272,6 +316,24 @@ class PremarketScanner:
     def get_gappers_down(self) -> list[ScanResult]:
         """Get candidates with negative gap (gap down)"""
         return [c for c in self.candidates if c.gap_percent < 0]
+
+    def get_premarket_context(self, symbol: str) -> Optional[PremktContext]:
+        """Get premarket context for a symbol (for context score calculation)"""
+        return self.premarket_context.get(symbol)
+
+    def update_open_prices(self):
+        """Update open prices for all cached symbols (call at 9:30)"""
+        for symbol, ctx in self.premarket_context.items():
+            open_price = market_data.get_open_price(symbol)
+            if open_price:
+                ctx.open_price = open_price
+                logger.debug(f"{symbol}: Updated open price to ${open_price:.2f}")
+
+    def reset(self):
+        """Reset scanner state for new day"""
+        self.candidates.clear()
+        self.premarket_context.clear()
+        logger.info("Premarket scanner reset")
 
     def format_watchlist_message(self) -> str:
         """Format watchlist for Telegram message"""

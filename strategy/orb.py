@@ -6,7 +6,12 @@ from datetime import datetime, time
 from typing import Optional
 from enum import Enum
 import pandas as pd
+import pytz
 from loguru import logger
+
+
+# US Eastern timezone for market hours
+EST = pytz.timezone('US/Eastern')
 
 from config.settings import settings
 from data.market_data import market_data
@@ -15,6 +20,7 @@ from data.indicators import (
     calculate_macd, is_macd_bullish, is_macd_bearish,
     calculate_atr, IndicatorCalculator, indicator_cache
 )
+from scanner.premarket import premarket_scanner
 
 
 class SignalType(Enum):
@@ -61,10 +67,14 @@ class TradeSignal:
     macd_histogram: float = 0.0
     # Sentiment score (-1 to 1)
     sentiment_score: float = 0.0
-    # Phase 4: Signal quality score (0-100)
+    # Phase 4: Signal quality score (0-100 base + 14 context = 114 max)
     signal_score: float = 0.0
     # Signal quality classification (ÓPTIMA/BUENA/REGULAR/DÉBIL)
     quality_level: str = ''
+    # Context score breakdown (for transparency)
+    context_score: float = 0.0
+    premarket_level_score: float = 0.0
+    gap_behavior_score: float = 0.0
 
     def __str__(self) -> str:
         emoji = "🟢" if self.signal_type == SignalType.LONG else "🔴"
@@ -177,7 +187,7 @@ class ORBStrategy:
                 low=low,
                 range_size=range_size,
                 vwap=calculate_vwap(orb_bars).iloc[-1],
-                timestamp=datetime.now()
+                timestamp=datetime.now(EST)
             )
 
             self.opening_ranges[symbol] = orb
@@ -238,7 +248,7 @@ class ORBStrategy:
             latest_time_str = self.config.latest_trade_time
             latest_hour, latest_minute = map(int, latest_time_str.split(':'))
             latest_time = time(latest_hour, latest_minute)
-            if datetime.now().time() > latest_time:
+            if datetime.now(EST).time() > latest_time:
                 logger.debug(f"Past trading window ({latest_time_str}), no new entries")
                 return None
         except (ValueError, AttributeError):
@@ -511,21 +521,136 @@ class ORBStrategy:
 
         return score
 
+    def _calculate_context_score(
+        self,
+        symbol: str,
+        current_price: float,
+        orb: OpeningRange,
+        direction: str
+    ) -> tuple[float, float, float]:
+        """
+        Calculate context score based on premarket levels and gap behavior.
+
+        Args:
+            symbol: Stock symbol
+            current_price: Current price
+            orb: Opening Range data
+            direction: 'LONG' or 'SHORT'
+
+        Returns:
+            Tuple of (total_context_score, premarket_level_score, gap_behavior_score)
+        """
+        premarket_level_score = 0.0
+        gap_behavior_score = 0.0
+
+        # Get premarket context
+        ctx = premarket_scanner.get_premarket_context(symbol)
+        if not ctx:
+            logger.debug(f"{symbol}: No premarket context available")
+            return (0.0, 0.0, 0.0)
+
+        # 1. PREMARKET LEVELS (0-8 pts)
+        if direction == 'LONG':
+            # For LONG: check if premarket high is above ORB high (resistance)
+            if orb.high < ctx.premarket_high:
+                # Space between ORB high and premarket high
+                distance_pct = (ctx.premarket_high - orb.high) / orb.high
+                if distance_pct > 0.01:  # More than 1% space = free room
+                    premarket_level_score = 8.0
+                elif distance_pct > 0.003:  # 0.3-1% space
+                    premarket_level_score = 4.0
+                else:  # Very close (resistance)
+                    premarket_level_score = 2.0
+            else:
+                # ORB high already above premarket high = already broke resistance
+                premarket_level_score = 2.0
+        else:  # SHORT
+            # For SHORT: check if premarket low is below ORB low (support)
+            if orb.low > ctx.premarket_low:
+                # Space between ORB low and premarket low
+                distance_pct = (orb.low - ctx.premarket_low) / orb.low
+                if distance_pct > 0.01:  # More than 1% space = free room
+                    premarket_level_score = 8.0
+                elif distance_pct > 0.003:  # 0.3-1% space
+                    premarket_level_score = 4.0
+                else:  # Very close (support)
+                    premarket_level_score = 2.0
+            else:
+                # ORB low already below premarket low = already broke support
+                premarket_level_score = 2.0
+
+        # 2. GAP BEHAVIOR (0-6 pts)
+        # Check if open_price is available (set at 9:30)
+        open_price = ctx.open_price
+        if open_price <= 0:
+            # Try to get it now
+            open_price = market_data.get_open_price(symbol) or 0
+
+        if open_price > 0:
+            gap_is_up = open_price > ctx.prev_close
+
+            if direction == 'LONG':
+                if gap_is_up:
+                    # Gap up - check if expanding or filling
+                    if current_price > open_price:
+                        # Price above open = gap expanding (good)
+                        gap_behavior_score = 6.0
+                    elif abs(current_price - open_price) / open_price <= 0.005:
+                        # Within 0.5% of open = neutral
+                        gap_behavior_score = 3.0
+                    else:
+                        # Price below open = gap filling (bad for long)
+                        gap_behavior_score = 0.0
+                else:
+                    # Gap down but going long - check reversal strength
+                    if current_price > open_price:
+                        gap_behavior_score = 4.0  # Reversal happening
+                    else:
+                        gap_behavior_score = 1.0  # Weak
+            else:  # SHORT
+                if not gap_is_up:  # Gap down
+                    # Gap down - check if expanding or filling
+                    if current_price < open_price:
+                        # Price below open = gap expanding (good for short)
+                        gap_behavior_score = 6.0
+                    elif abs(current_price - open_price) / open_price <= 0.005:
+                        # Within 0.5% of open = neutral
+                        gap_behavior_score = 3.0
+                    else:
+                        # Price above open = gap filling (bad for short)
+                        gap_behavior_score = 0.0
+                else:
+                    # Gap up but going short - check reversal strength
+                    if current_price < open_price:
+                        gap_behavior_score = 4.0  # Reversal happening
+                    else:
+                        gap_behavior_score = 1.0  # Weak
+
+        total_context_score = premarket_level_score + gap_behavior_score
+
+        logger.debug(
+            f"{symbol} Context Score: {total_context_score:.0f}/14 "
+            f"(premarket_levels={premarket_level_score:.0f}, gap_behavior={gap_behavior_score:.0f})"
+        )
+
+        return (total_context_score, premarket_level_score, gap_behavior_score)
+
     def classify_signal_quality(self, score: float) -> str:
         """
         Classify signal by quality level based on score.
 
         Args:
-            score: Signal score (0-100)
+            score: Signal score (0-114 with context score)
 
         Returns:
             Quality level: 'ÓPTIMA', 'BUENA', 'REGULAR', or 'DÉBIL'
         """
-        if score >= 70:
+        # Updated thresholds for 0-114 scale (base 100 + context 14)
+        if score >= 80:
             return 'ÓPTIMA'
-        elif score >= 55:
+        elif score >= 65:
             return 'BUENA'
-        elif score >= 40:
+        elif score >= 50:
             return 'REGULAR'
         else:
             return 'DÉBIL'
@@ -673,7 +798,14 @@ class ORBStrategy:
             entry_price, stop_loss
         )
 
-        quality_level = self.classify_signal_quality(signal_score)
+        # Calculate context score
+        context_score, premarket_level_score, gap_behavior_score = self._calculate_context_score(
+            symbol, entry_price, orb, 'LONG'
+        )
+
+        # Add context score to total
+        total_score = signal_score + context_score
+        quality_level = self.classify_signal_quality(total_score)
 
         signal = TradeSignal(
             symbol=symbol,
@@ -688,17 +820,20 @@ class ORBStrategy:
             vwap=vwap,
             rsi=rsi,
             relative_volume=rel_volume,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(EST),
             macd=macd,
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
             sentiment_score=sentiment,
-            signal_score=signal_score,
-            quality_level=quality_level
+            signal_score=total_score,
+            quality_level=quality_level,
+            context_score=context_score,
+            premarket_level_score=premarket_level_score,
+            gap_behavior_score=gap_behavior_score
         )
 
         self.signals_today.append(signal)
-        logger.info(f"LONG signal generated [{quality_level}]: {signal}")
+        logger.info(f"LONG signal generated [{quality_level}]: {signal} (context: +{context_score:.0f})")
 
         return signal
 
@@ -726,7 +861,14 @@ class ORBStrategy:
             entry_price, stop_loss
         )
 
-        quality_level = self.classify_signal_quality(signal_score)
+        # Calculate context score
+        context_score, premarket_level_score, gap_behavior_score = self._calculate_context_score(
+            symbol, entry_price, orb, 'SHORT'
+        )
+
+        # Add context score to total
+        total_score = signal_score + context_score
+        quality_level = self.classify_signal_quality(total_score)
 
         signal = TradeSignal(
             symbol=symbol,
@@ -741,17 +883,20 @@ class ORBStrategy:
             vwap=vwap,
             rsi=rsi,
             relative_volume=rel_volume,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(EST),
             macd=macd,
             macd_signal=macd_signal,
             macd_histogram=macd_histogram,
             sentiment_score=sentiment,
-            signal_score=signal_score,
-            quality_level=quality_level
+            signal_score=total_score,
+            quality_level=quality_level,
+            context_score=context_score,
+            premarket_level_score=premarket_level_score,
+            gap_behavior_score=gap_behavior_score
         )
 
         self.signals_today.append(signal)
-        logger.info(f"SHORT signal generated [{quality_level}]: {signal}")
+        logger.info(f"SHORT signal generated [{quality_level}]: {signal} (context: +{context_score:.0f})")
 
         return signal
 

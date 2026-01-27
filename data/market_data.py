@@ -165,13 +165,13 @@ class MarketDataClient:
 
     def get_premarket_data(self, symbol: str) -> Optional[dict]:
         """
-        Get pre-market data for a symbol
+        Get pre-market data for a symbol including High/Low levels
 
         Args:
             symbol: Stock symbol
 
         Returns:
-            Dict with pre-market price change and volume
+            Dict with pre-market price change, volume, and High/Low levels
         """
         try:
             # Get previous day close
@@ -189,27 +189,80 @@ class MarketDataClient:
             current_price = quote['mid']
             gap_percent = ((current_price - prev_close) / prev_close) * 100
 
-            # Get today's pre-market bars for volume
+            # Get today's pre-market bars for volume and High/Low
             today = datetime.now().replace(hour=4, minute=0, second=0, microsecond=0)
             premarket_bars = self.get_bars(
                 symbol=symbol,
                 timeframe=TimeFrame.Minute,
                 start=today,
-                limit=300
+                limit=330  # 4:00 AM to 9:30 AM = 5.5 hours = 330 minutes
             )
 
-            premarket_volume = int(premarket_bars['volume'].sum()) if not premarket_bars.empty else 0
+            premarket_volume = 0
+            premarket_high = current_price
+            premarket_low = current_price
+
+            if not premarket_bars.empty:
+                premarket_volume = int(premarket_bars['volume'].sum())
+                premarket_high = float(premarket_bars['high'].max())
+                premarket_low = float(premarket_bars['low'].min())
 
             return {
                 'symbol': symbol,
                 'prev_close': prev_close,
                 'current_price': current_price,
                 'gap_percent': gap_percent,
-                'premarket_volume': premarket_volume
+                'premarket_volume': premarket_volume,
+                'premarket_high': premarket_high,
+                'premarket_low': premarket_low
             }
 
         except Exception as e:
             logger.error(f"Error getting pre-market data for {symbol}: {e}")
+            return None
+
+    def get_previous_close(self, symbol: str) -> Optional[float]:
+        """
+        Get previous day's closing price
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Previous close price or None
+        """
+        try:
+            daily = self.get_daily_bars(symbol, days=2)
+            if daily.empty or len(daily) < 1:
+                return None
+            return float(daily['close'].iloc[-1])
+        except Exception as e:
+            logger.error(f"Error getting previous close for {symbol}: {e}")
+            return None
+
+    def get_open_price(self, symbol: str) -> Optional[float]:
+        """
+        Get today's opening price (9:30 AM bar)
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Today's open price or None
+        """
+        try:
+            today = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
+            bars = self.get_bars(
+                symbol=symbol,
+                timeframe=TimeFrame.Minute,
+                start=today,
+                limit=5
+            )
+            if bars.empty:
+                return None
+            return float(bars['open'].iloc[0])
+        except Exception as e:
+            logger.error(f"Error getting open price for {symbol}: {e}")
             return None
 
     def get_avg_daily_volume(self, symbol: str, days: int = 20) -> int:

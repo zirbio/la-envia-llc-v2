@@ -4,6 +4,8 @@ Trading Mode Selection Screen
 Detailed trading mode selection and confirmation.
 """
 from typing import Optional
+from datetime import datetime
+import pytz
 
 try:
     from rich.console import Console
@@ -21,6 +23,68 @@ except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
 
 from config.settings import TradingMode, settings
+
+
+EST = pytz.timezone('US/Eastern')
+MADRID = pytz.timezone('Europe/Madrid')
+
+
+def convert_est_to_madrid(est_time_str: str) -> str:
+    """
+    Convert an EST time string to Madrid time.
+
+    Args:
+        est_time_str: Time string like "9:30 AM" or "8:00"
+
+    Returns:
+        Time string in Madrid timezone
+    """
+    # Clean up the time string
+    time_str = est_time_str.strip().upper()
+    is_pm = 'PM' in time_str
+    is_am = 'AM' in time_str
+    time_str = time_str.replace('AM', '').replace('PM', '').strip()
+
+    # Parse hour and minute
+    parts = time_str.split(':')
+    hour = int(parts[0])
+    minute = int(parts[1]) if len(parts) > 1 else 0
+
+    # Convert 12-hour to 24-hour if needed
+    if is_pm and hour != 12:
+        hour += 12
+    elif is_am and hour == 12:
+        hour = 0
+
+    # Create EST datetime and convert to Madrid
+    now = datetime.now(EST)
+    est_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    madrid_dt = est_dt.astimezone(MADRID)
+
+    return madrid_dt.strftime('%H:%M')
+
+
+def format_dual_hours(est_hours: str) -> str:
+    """
+    Format hours string with both EST and Madrid times.
+
+    Args:
+        est_hours: Hours string like "9:30 AM - 4:00 PM EST"
+
+    Returns:
+        String like "9:30 - 16:00 EST (15:30 - 22:00 Madrid)"
+    """
+    # Remove "EST" suffix if present
+    hours = est_hours.replace('EST', '').strip()
+
+    # Split start and end times
+    if ' - ' in hours:
+        start, end = hours.split(' - ')
+        start_madrid = convert_est_to_madrid(start)
+        end_madrid = convert_est_to_madrid(end)
+        return f"{hours} EST ({start_madrid} - {end_madrid} Madrid)"
+
+    return est_hours
 
 
 class TradingModeScreen:
@@ -46,7 +110,7 @@ class TradingModeScreen:
             TradingMode.REGULAR: {
                 'name': 'Regular Hours',
                 'emoji': '📊',
-                'hours': '9:30 AM - 4:00 PM EST',
+                'hours': '9:30 - 16:00 EST (15:30 - 22:00 Madrid)',
                 'strategy': 'Opening Range Breakout (ORB)',
                 'position_size': '100%',
                 'stop_mult': '1.5x ATR',
@@ -58,7 +122,7 @@ class TradingModeScreen:
             TradingMode.PREMARKET: {
                 'name': 'Premarket',
                 'emoji': '🌅',
-                'hours': f'{ext_config.premarket_trade_start} - {ext_config.premarket_trade_end} EST',
+                'hours': f'{ext_config.premarket_trade_start} - {ext_config.premarket_trade_end} EST (14:00 - 15:25 Madrid)',
                 'strategy': 'Gap & Go (Momentum)',
                 'position_size': f'{ext_config.premarket_position_size_mult*100:.0f}%',
                 'stop_mult': f'{ext_config.premarket_stop_atr_mult}x ATR',
@@ -71,7 +135,7 @@ class TradingModeScreen:
             TradingMode.POSTMARKET: {
                 'name': 'Postmarket',
                 'emoji': '🌙',
-                'hours': f'{ext_config.postmarket_trade_start} - {ext_config.postmarket_trade_end} EST',
+                'hours': f'{ext_config.postmarket_trade_start} - {ext_config.postmarket_trade_end} EST (22:05 - 00:00 Madrid)',
                 'strategy': 'Earnings & News Reactions',
                 'position_size': f'{ext_config.postmarket_position_size_mult*100:.0f}%',
                 'stop_mult': f'{ext_config.postmarket_stop_atr_mult}x ATR',
@@ -80,12 +144,12 @@ class TradingModeScreen:
                 'spread_max': f'{ext_config.postmarket_max_spread_pct*100:.1f}%',
                 'force_close': ext_config.postmarket_force_close,
                 'description': 'Trading post-cierre. Reacciones a earnings y noticias. '
-                             'Requiere movimiento mínimo 5%. Cierre forzado a las 19:30.'
+                             'Requiere movimiento mínimo 5%. Cierre forzado a las 19:30 EST (01:30 Madrid).'
             },
             TradingMode.ALL_SESSIONS: {
                 'name': 'Todas las Sesiones',
                 'emoji': '🔄',
-                'hours': f'{ext_config.premarket_trade_start} AM - {ext_config.postmarket_trade_end} PM EST',
+                'hours': f'{ext_config.premarket_trade_start} - {ext_config.postmarket_trade_end} EST (14:00 - 00:00 Madrid)',
                 'strategy': 'Gap & Go → ORB → Earnings',
                 'position_size': 'Variable por sesión',
                 'description': 'Trading en todas las sesiones. Cambia automáticamente de '

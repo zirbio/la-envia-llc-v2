@@ -173,10 +173,10 @@ def create_trading_mode_menu() -> Menu:
         border_style="blue"
     )
 
-    menu.add_item("1", "Regular Hours", "9:30 - 16:00 EST")
-    menu.add_item("2", "Premarket", "8:00 - 9:25 EST")
-    menu.add_item("3", "Postmarket", "16:05 - 18:00 EST")
-    menu.add_item("4", "Todas las Sesiones", "8:00 - 18:00 EST")
+    menu.add_item("1", "Regular Hours", "9:30-16:00 EST (15:30-22:00 Madrid)")
+    menu.add_item("2", "Premarket", "8:00-9:25 EST (14:00-15:25 Madrid)")
+    menu.add_item("3", "Postmarket", "16:05-18:00 EST (22:05-00:00 Madrid)")
+    menu.add_item("4", "Todas las Sesiones", "8:00-18:00 EST (14:00-00:00 Madrid)")
     menu.add_separator()
     menu.add_item("5", "Configuración avanzada")
     menu.add_item("6", "Estado de cuenta")

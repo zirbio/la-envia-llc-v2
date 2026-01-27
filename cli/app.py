@@ -34,6 +34,31 @@ from execution.orders import order_executor
 
 
 EST = pytz.timezone('US/Eastern')
+MADRID = pytz.timezone('Europe/Madrid')
+
+
+def format_dual_timezone(est_time: str) -> str:
+    """
+    Convert EST time string to display with both EST and Madrid timezones.
+
+    Args:
+        est_time: Time in format "HH:MM" (EST)
+
+    Returns:
+        String like "9:30 EST (15:30 Madrid)"
+    """
+    hour, minute = map(int, est_time.replace(' ', '').split(':'))
+    now = datetime.now(EST)
+    est_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    madrid_dt = est_dt.astimezone(MADRID)
+    return f"{est_time} EST ({madrid_dt.strftime('%H:%M')} Madrid)"
+
+
+def get_current_dual_time() -> str:
+    """Get current time in both EST and Madrid timezones."""
+    now_est = datetime.now(EST)
+    now_madrid = now_est.astimezone(MADRID)
+    return f"{now_est.strftime('%H:%M')} EST / {now_madrid.strftime('%H:%M')} Madrid"
 
 
 class CLIApp:
@@ -122,16 +147,19 @@ class CLIApp:
 
     def _display_main_menu(self) -> str:
         """Display main menu and get selection"""
+        current_time = get_current_dual_time()
+
         if not RICH_AVAILABLE:
             print("\nSELECCIONE MODO DE TRADING:")
-            print("1. Regular Hours (9:30-16:00 EST)")
-            print("2. Premarket (8:00-9:25 EST)")
-            print("3. Postmarket (16:05-18:00 EST)")
-            print("4. Todas las Sesiones (8:00-18:00 EST)")
-            print("-" * 40)
+            print("1. Regular Hours  9:30-16:00 EST (15:30-22:00 Madrid)")
+            print("2. Premarket      8:00-9:25 EST  (14:00-15:25 Madrid)")
+            print("3. Postmarket     16:05-18:00 EST (22:05-00:00 Madrid)")
+            print("4. Todas Sesiones 8:00-18:00 EST (14:00-00:00 Madrid)")
+            print("-" * 50)
             print("5. Configuración avanzada")
             print("6. Estado de cuenta")
             print("7. Salir")
+            print(f"\n⏰ Hora actual: {current_time}")
             return input("\nSeleccione [1-7]: ").strip()
 
         # Create menu table
@@ -144,20 +172,22 @@ class CLIApp:
         )
         table.add_column("Opción", style="cyan", width=4)
         table.add_column("Descripción", style="white")
-        table.add_column("Horario", style="dim")
+        table.add_column("Horario EST", style="dim")
+        table.add_column("Horario Madrid", style="dim cyan")
 
-        table.add_row("1", "Regular Hours", "9:30 - 16:00 EST")
-        table.add_row("2", "Premarket", "8:00 - 9:25 EST")
-        table.add_row("3", "Postmarket", "16:05 - 18:00 EST")
-        table.add_row("4", "Todas las Sesiones", "8:00 - 18:00 EST")
-        table.add_row("", "", "")
-        table.add_row("5", "Configuración avanzada", "")
-        table.add_row("6", "Estado de cuenta", "")
-        table.add_row("7", "Salir", "")
+        table.add_row("1", "Regular Hours", "9:30 - 16:00", "15:30 - 22:00")
+        table.add_row("2", "Premarket", "8:00 - 9:25", "14:00 - 15:25")
+        table.add_row("3", "Postmarket", "16:05 - 18:00", "22:05 - 00:00")
+        table.add_row("4", "Todas las Sesiones", "8:00 - 18:00", "14:00 - 00:00")
+        table.add_row("", "", "", "")
+        table.add_row("5", "Configuración avanzada", "", "")
+        table.add_row("6", "Estado de cuenta", "", "")
+        table.add_row("7", "Salir", "", "")
 
         panel = Panel(
             table,
             title="[bold]SELECCIONE MODO DE TRADING[/bold]",
+            subtitle=f"[dim]⏰ Hora actual: {current_time}[/dim]",
             border_style="blue",
             padding=(1, 1)
         )

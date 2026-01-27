@@ -207,18 +207,18 @@ class TradingBot:
                 replace_existing=True
             )
 
-            # Calculate Opening Range at 9:45 AM EST
+            # Calculate Opening Range at 9:35 AM EST (5 min after open)
             self.scheduler.add_job(
                 self._calculate_opening_ranges,
-                CronTrigger(hour=9, minute=45, timezone=EST),
+                CronTrigger(hour=9, minute=35, timezone=EST),
                 id='calculate_orb',
                 replace_existing=True
             )
 
-            # Start monitoring at 9:46 AM EST
+            # Start monitoring at 9:36 AM EST
             self.scheduler.add_job(
                 self._start_monitoring,
-                CronTrigger(hour=9, minute=46, timezone=EST),
+                CronTrigger(hour=9, minute=36, timezone=EST),
                 id='start_monitoring',
                 replace_existing=True
             )
@@ -231,7 +231,7 @@ class TradingBot:
                 replace_existing=True
             )
 
-            logger.info("Regular hours tasks scheduled (9:25 - 16:00 EST)")
+            logger.info("Regular hours tasks scheduled (9:25 scan, 9:35 ORB, 9:36-16:00 monitoring)")
 
         # Extended hours: Postmarket tasks
         if self.trading_mode in (TradingMode.POSTMARKET, TradingMode.ALL_SESSIONS):
@@ -309,6 +309,9 @@ class TradingBot:
     async def _calculate_opening_ranges(self):
         """Calculate Opening Range for watchlist symbols"""
         logger.info("Calculating Opening Ranges...")
+
+        # Update open prices for context score calculation
+        premarket_scanner.update_open_prices()
 
         for symbol in self.watchlist:
             orb = orb_strategy.calculate_opening_range(symbol)
@@ -645,6 +648,7 @@ class TradingBot:
         orb_strategy.reset_daily()
         premarket_strategy.reset_daily()
         postmarket_strategy.reset_daily()
+        premarket_scanner.reset()  # Reset premarket context cache
         position_manager.reset()
         self.watchlist.clear()
         self.trades_today.clear()
@@ -895,15 +899,15 @@ class TradingBot:
     # ========== End Extended Hours Methods ==========
 
     async def _check_immediate_start(self):
-        """Check if we're already in trading window and start immediately"""
+        """Check if we're already in trading window and start immediately with adaptive logic"""
         now = datetime.now(EST)
         current_time = now.time()
 
-        # Trading window: 9:30 AM - 16:00 EST (market close)
-        market_open = time(9, 30)
+        # Key times (EST) - updated for 5-min ORB
         premarket_scan = time(9, 25)
-        orb_ready = time(9, 45)
-        monitor_start = time(9, 46)
+        market_open = time(9, 30)
+        orb_ready = time(9, 35)      # ORB ready after 5 min
+        monitor_start = time(9, 36)  # Start monitoring
         session_end = time(16, 0)
 
         # Check if market is open today
@@ -922,7 +926,7 @@ class TradingBot:
             return
 
         if current_time >= monitor_start:
-            # We're in the monitoring window - run full startup sequence
+            # After 9:36 - run full startup sequence immediately
             await telegram_bot.send_message(
                 "🤖 *Bot iniciado*\n"
                 "🟢 *Mercado ABIERTO*\n"
@@ -933,20 +937,34 @@ class TradingBot:
             # Run premarket scan
             await self._run_premarket_scan()
 
-            # Calculate ORBs
+            # Calculate ORBs (data available)
             await self._calculate_opening_ranges()
 
             # Start monitoring
             await self._start_monitoring()
 
-        elif current_time >= premarket_scan:
-            # Between 9:25 and 9:46 - run scan, will catch up to schedule
+        elif current_time >= orb_ready:
+            # Between 9:35 and 9:36 - scan + ORB, then wait for monitor schedule
             await telegram_bot.send_message(
                 "🤖 *Bot iniciado*\n"
                 "🟢 *Mercado ABIERTO*\n"
-                "📊 Ejecutando scanner..."
+                "📊 Ejecutando scanner y calculando ORB..."
             )
-            logger.info("Market open - running premarket scan")
+            logger.info("Market open - running scan and ORB calculation")
+            await self._run_premarket_scan()
+            await self._calculate_opening_ranges()
+            # Monitoring will start via scheduler at 9:36
+
+        elif current_time >= premarket_scan:
+            # Between 9:25 and 9:35 - run scan, wait for ORB data
+            minutes_to_orb = (orb_ready.hour * 60 + orb_ready.minute) - (current_time.hour * 60 + current_time.minute)
+            await telegram_bot.send_message(
+                "🤖 *Bot iniciado*\n"
+                "🟢 *Mercado ABIERTO*\n"
+                f"📊 Ejecutando scanner...\n"
+                f"⏳ ORB en {minutes_to_orb} min (9:35 EST)"
+            )
+            logger.info(f"Market open - running scan, ORB in {minutes_to_orb} min")
             await self._run_premarket_scan()
 
         else:
