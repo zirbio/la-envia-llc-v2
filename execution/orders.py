@@ -490,9 +490,26 @@ class OrderExecutor:
                     )
                 await asyncio.sleep(1)  # Non-blocking async sleep
 
-            price_str = f"${filled_price:.2f}" if filled_price is not None else "pending"
+            # If order didn't fill within timeout, cancel it and return failure
+            if filled_price is None:
+                logger.warning(
+                    f"OTO entry timeout: {symbol} not filled in {max_wait}s, cancelling..."
+                )
+                try:
+                    await asyncio.to_thread(self.client.cancel_order_by_id, order.id)
+                    logger.info(f"Cancelled unfilled OTO entry order for {symbol}")
+                except Exception as cancel_err:
+                    logger.error(f"Error cancelling unfilled OTO entry: {cancel_err}")
+
+                return BracketOrderResult(
+                    success=False,
+                    order_id=order.id,
+                    symbol=symbol,
+                    error=f"Entry order not filled within {max_wait}s timeout - order cancelled"
+                )
+
             logger.info(
-                f"OTO entry executed: {symbol} filled @ {price_str}, "
+                f"OTO entry executed: {symbol} filled @ ${filled_price:.2f}, "
                 f"stop_order_id={stop_order_id}"
             )
 

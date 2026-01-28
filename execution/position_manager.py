@@ -198,7 +198,19 @@ class PositionManager:
         # Check if position still exists in Alpaca
         alpaca_position = order_executor.get_position(position.symbol)
         if not alpaca_position:
-            # Position was closed (stop hit or manual)
+            # Before assuming position was closed, verify the entry actually filled
+            # If stop order is 'held', it means entry never filled (phantom position)
+            if position.current_stop_order_id:
+                stop_order = order_executor.get_order_by_id(position.current_stop_order_id)
+                if stop_order and stop_order.get('status') == 'held':
+                    logger.warning(
+                        f"Position {position.symbol}: entry order never filled "
+                        f"(stop order status='held'), removing phantom position"
+                    )
+                    self.remove_position(position.symbol)
+                    return events  # No position_closed event for phantom position
+
+            # Entry was filled, position is now closed (stop hit or manual)
             position.state = PositionState.STOPPED
             position.close_time = datetime.now()
             position.exit_reason = "Stop loss triggered"

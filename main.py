@@ -603,8 +603,15 @@ class TradingBot:
             await telegram_bot.send_message(f"❌ Error ejecutando orden: {oto_result.error}")
             return
 
-        # Get fill price from OTO order result
-        fill_price = oto_result.filled_price or signal.entry_price
+        # Validate that entry actually filled - no fallback allowed
+        if not oto_result.filled_price:
+            await telegram_bot.send_message(
+                f"⚠️ Orden no ejecutada: {signal.symbol}\n"
+                f"El precio límite no fue alcanzado. Orden cancelada."
+            )
+            return
+
+        fill_price = oto_result.filled_price  # Must be actual fill, no fallback
 
         # Get stop order ID from OTO order legs (validated in execute_oto_entry)
         stop_order_id = oto_result.stop_order_id
