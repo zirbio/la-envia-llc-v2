@@ -203,6 +203,18 @@ class PositionManager:
             position.close_time = datetime.now()
             position.exit_reason = "Stop loss triggered"
 
+            # Get the actual exit price from the stop order (not trigger price)
+            actual_exit_price = position.current_stop_loss  # Fallback to trigger price
+            if position.current_stop_order_id:
+                stop_order = order_executor.get_order_by_id(position.current_stop_order_id)
+                if stop_order and stop_order.get('filled_avg_price'):
+                    actual_exit_price = stop_order['filled_avg_price']
+                    logger.info(
+                        f"Position {position.symbol} closed: "
+                        f"stop trigger=${position.current_stop_loss:.2f}, "
+                        f"actual fill=${actual_exit_price:.2f}"
+                    )
+
             events.append(PositionEvent(
                 event_type='position_closed',
                 symbol=position.symbol,
@@ -210,6 +222,7 @@ class PositionManager:
                     'reason': 'stop_loss',
                     'entry_price': position.entry_price,
                     'stop_loss': position.current_stop_loss,
+                    'exit_price': actual_exit_price,  # Real fill price
                     'qty': position.current_qty
                 }
             ))

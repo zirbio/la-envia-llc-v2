@@ -435,6 +435,20 @@ class TradingBot:
 
             current_volume = int(bars['volume'].iloc[-1])
 
+            # Validate price is not anomalous (too far from ORB range)
+            orb = orb_strategy.opening_ranges.get(symbol)
+            if orb:
+                orb_mid = (orb.high + orb.low) / 2
+                price_deviation_pct = abs(current_price - orb_mid) / orb_mid
+
+                # If price deviates more than 50% from ORB midpoint, likely bad data
+                if price_deviation_pct > 0.5:
+                    logger.warning(
+                        f"{symbol}: Price ${current_price:.2f} too far from ORB "
+                        f"(${orb.low:.2f}-${orb.high:.2f}), deviation={price_deviation_pct:.1%}, skipping"
+                    )
+                    return None
+
             # Check for breakout
             signal = orb_strategy.check_breakout(
                 symbol=symbol,
@@ -529,19 +543,22 @@ class TradingBot:
             elif event.event_type == 'position_closed':
                 position = position_manager.get_position(event.symbol)
                 if position:
+                    # Use actual exit price from event (fill price), not trigger price
+                    actual_exit_price = event.details.get('exit_price', position.current_stop_loss)
+
                     await telegram_bot.send_position_stopped(
                         symbol=event.symbol,
                         entry_price=position.entry_price,
-                        stop_price=position.current_stop_loss,
+                        stop_price=actual_exit_price,  # Use actual fill price for P&L
                         qty=position.current_qty,
                         reason=event.details.get('reason', 'unknown')
                     )
 
-                    # Record trade result for Kelly calculation
+                    # Record trade result for Kelly calculation with actual fill price
                     orb_strategy.record_trade_result(
                         symbol=event.symbol,
                         entry_price=position.entry_price,
-                        exit_price=position.current_stop_loss,
+                        exit_price=actual_exit_price,  # Use actual fill price
                         is_long=(position.side == 'long')
                     )
 

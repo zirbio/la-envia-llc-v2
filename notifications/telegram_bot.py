@@ -18,6 +18,18 @@ from strategy.orb import TradeSignal, SignalType, orb_strategy
 from execution.orders import order_executor
 
 
+def _escape_markdown(text: str) -> str:
+    """
+    Escape Markdown special characters to prevent parsing errors.
+
+    Telegram Markdown V1 uses _ for italic and * for bold.
+    Underscores in variable names like 'trailing_ema9' cause parsing errors.
+    """
+    if not text:
+        return text
+    return text.replace('_', '\\_').replace('*', '\\*')
+
+
 class TradingTelegramBot:
     """Telegram bot for trading notifications and confirmations"""
 
@@ -384,7 +396,7 @@ Total: ${qty * price:,.2f}
 {emoji} *{status}*
 
 {symbol}: {direction}${pnl:.2f}
-Razón: {reason}
+Razón: {_escape_markdown(reason)}
         """
         return await self.send_message(message.strip())
 
@@ -560,7 +572,7 @@ Stop: ${stop_price:.2f}
 Qty: {qty}
 P/L: {direction}${pnl:.2f}
 
-Razon: {reason}
+Razon: {_escape_markdown(reason)}
         """
         return await self.send_message(message.strip())
 
