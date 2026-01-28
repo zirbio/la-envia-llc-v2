@@ -5,6 +5,7 @@ Main controller for the interactive CLI interface.
 Uses Rich for beautiful terminal output and prompt_toolkit for input.
 """
 import asyncio
+import os
 from typing import Optional
 from datetime import datetime
 import pytz
@@ -84,11 +85,13 @@ class CLIApp:
             print(text)
 
     def _clear(self):
-        """Clear screen"""
+        """Clear screen (cross-platform)"""
         if PROMPT_TOOLKIT_AVAILABLE:
             clear()
         else:
-            print("\033[H\033[J", end="")
+            # Use os.system for cross-platform compatibility
+            # 'cls' for Windows, 'clear' for Unix/macOS
+            os.system('cls' if os.name == 'nt' else 'clear')
 
     def _get_market_status(self) -> tuple[str, str]:
         """Get current market status"""

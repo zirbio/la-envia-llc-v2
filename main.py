@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 from datetime import datetime, time
+from pathlib import Path
 from typing import Optional
 import pytz
 from loguru import logger
@@ -29,6 +30,9 @@ from execution.orders import order_executor
 from execution.position_manager import position_manager, PositionEvent
 from notifications.telegram_bot import telegram_bot
 
+
+# Ensure logs directory exists (Windows compatibility)
+Path("logs").mkdir(exist_ok=True)
 
 # Configure logging
 logger.remove()
@@ -1049,16 +1053,24 @@ async def main():
     # Create bot with trading mode
     bot = TradingBot(trading_mode=trading_mode)
 
-    # Handle graceful shutdown
-    def signal_handler(sig, frame):
-        logger.info("Shutdown signal received")
-        asyncio.create_task(bot.stop())
-
-    signal.signal(signal.SIGINT, signal_handler)
+    # Handle graceful shutdown - cross-platform
     if sys.platform != 'win32':
-        signal.signal(signal.SIGTERM, signal_handler)
-
-    await bot.start()
+        # Unix: Use loop signal handlers (works correctly with asyncio)
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(
+                sig,
+                lambda: asyncio.create_task(bot.stop())
+            )
+        await bot.start()
+    else:
+        # Windows: Use try/except for KeyboardInterrupt (Ctrl+C)
+        # Signal handlers on Windows don't work well with asyncio
+        try:
+            await bot.start()
+        except KeyboardInterrupt:
+            logger.info("Shutdown signal received (KeyboardInterrupt)")
+            await bot.stop()
 
 
 if __name__ == "__main__":
