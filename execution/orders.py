@@ -1,6 +1,7 @@
 """
 Order execution and position management via Alpaca API
 """
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -389,26 +390,27 @@ class OrderExecutor:
             logger.error(f"Error executing entry order: {e}")
             return OrderResult(success=False, error=str(e))
 
-    def execute_bracket_entry(
+    async def execute_oto_entry(
         self,
         symbol: str,
         qty: int,
         side: str,
         stop_price: float,
-        take_profit_price: float,
         use_limit: bool = False,
         limit_price: float = None
     ) -> BracketOrderResult:
         """
-        Execute an entry order with bracket (stop loss + take profit) as a single atomic order.
-        This avoids Alpaca's wash trade detection by combining all orders into one request.
+        Execute entry with OTO (One-Triggers-Other) - entry triggers stop loss only.
+        No take profit order - compatible with partial close strategy.
+
+        This avoids Alpaca's wash trade detection and allows stop loss modification
+        (which bracket order legs do not support).
 
         Args:
             symbol: Stock symbol
             qty: Number of shares
             side: 'buy' or 'sell'
             stop_price: Stop loss trigger price
-            take_profit_price: Take profit limit price
             use_limit: Whether to use limit order for entry
             limit_price: Limit price if using limit order
 
@@ -425,13 +427,13 @@ class OrderExecutor:
                     side=order_side,
                     time_in_force=TimeInForce.DAY,
                     limit_price=round(limit_price, 2),
-                    order_class="bracket",
-                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
-                    take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2))
+                    order_class="oto",  # OTO instead of bracket
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2))
+                    # No take_profit - managed separately for partial close strategy
                 )
                 logger.info(
-                    f"Bracket order submitted: {side} {qty} {symbol} "
-                    f"@ limit ${limit_price:.2f}, SL=${stop_price:.2f}, TP=${take_profit_price:.2f}"
+                    f"OTO order submitted: {side} {qty} {symbol} "
+                    f"@ limit ${limit_price:.2f}, SL=${stop_price:.2f}"
                 )
             else:
                 order_request = MarketOrderRequest(
@@ -439,30 +441,37 @@ class OrderExecutor:
                     qty=qty,
                     side=order_side,
                     time_in_force=TimeInForce.DAY,
-                    order_class="bracket",
-                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
-                    take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2))
+                    order_class="oto",  # OTO instead of bracket
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2))
+                    # No take_profit - managed separately for partial close strategy
                 )
                 logger.info(
-                    f"Bracket order submitted: {side} {qty} {symbol} "
-                    f"@ market, SL=${stop_price:.2f}, TP=${take_profit_price:.2f}"
+                    f"OTO order submitted: {side} {qty} {symbol} "
+                    f"@ market, SL=${stop_price:.2f}"
                 )
 
             order = self.client.submit_order(order_request)
             self.active_orders[symbol] = order.id
 
-            # Extract leg order IDs from the bracket order response
+            # Extract stop order ID from OTO order legs
             stop_order_id = None
-            take_profit_order_id = None
 
             if hasattr(order, 'legs') and order.legs:
                 for leg in order.legs:
                     if leg.order_type == OrderType.STOP:
                         stop_order_id = leg.id
-                    elif leg.order_type == OrderType.LIMIT:
-                        take_profit_order_id = leg.id
 
-            # Wait for entry fill (max 10 seconds for market orders)
+            # VALIDATION: Fail if stop_order_id could not be extracted
+            if not stop_order_id:
+                logger.error(f"Failed to extract stop_order_id from OTO order {order.id}")
+                return BracketOrderResult(
+                    success=False,
+                    order_id=order.id,
+                    symbol=symbol,
+                    error="Could not extract stop_order_id from OTO order legs"
+                )
+
+            # Wait for entry fill (max 10 seconds for market orders) using async sleep
             filled_price = None
             if not use_limit:
                 for _ in range(10):
@@ -477,18 +486,18 @@ class OrderExecutor:
                             symbol=symbol,
                             error=f"Order {order_status.status.value}"
                         )
-                    time_module.sleep(1)
+                    await asyncio.sleep(1)  # Non-blocking async sleep
 
             logger.info(
-                f"Bracket entry executed: {symbol} filled @ ${filled_price:.2f if filled_price else 'pending'}, "
-                f"stop_order_id={stop_order_id}, tp_order_id={take_profit_order_id}"
+                f"OTO entry executed: {symbol} filled @ ${filled_price:.2f if filled_price else 'pending'}, "
+                f"stop_order_id={stop_order_id}"
             )
 
             return BracketOrderResult(
                 success=True,
                 order_id=order.id,
                 stop_order_id=stop_order_id,
-                take_profit_order_id=take_profit_order_id,
+                take_profit_order_id=None,  # OTO has no take profit
                 symbol=symbol,
                 side=side,
                 qty=qty,
@@ -497,7 +506,7 @@ class OrderExecutor:
             )
 
         except Exception as e:
-            logger.error(f"Error executing bracket entry: {e}")
+            logger.error(f"Error executing OTO entry: {e}")
             return BracketOrderResult(success=False, error=str(e))
 
     def create_stop_loss_order(
@@ -592,7 +601,7 @@ class OrderExecutor:
             logger.error(f"Error replacing stop order: {e}")
             return OrderResult(success=False, error=str(e))
 
-    def close_partial_position(
+    async def close_partial_position(
         self,
         symbol: str,
         qty: int,
@@ -623,7 +632,7 @@ class OrderExecutor:
 
             order = self.client.submit_order(order_request)
 
-            # Wait for fill (max 10 seconds) to get actual fill price
+            # Wait for fill (max 10 seconds) to get actual fill price using async sleep
             for _ in range(10):
                 order_status = self.client.get_order_by_id(order.id)
                 if order_status.status == OrderStatus.FILLED:
@@ -647,7 +656,7 @@ class OrderExecutor:
                         symbol=symbol,
                         error=f"Order {order_status.status.value}"
                     )
-                time_module.sleep(1)
+                await asyncio.sleep(1)  # Non-blocking async sleep
 
             # If not filled in 10s, return without fill price
             logger.warning(f"Partial close order not filled in 10s: {symbol}")

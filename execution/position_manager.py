@@ -253,7 +253,7 @@ class PositionManager:
         )
 
         # 1. Close partial position and get actual fill price
-        close_result = order_executor.close_partial_position(
+        close_result = await order_executor.close_partial_position(
             symbol=position.symbol,
             qty=close_qty,
             position_side=position.side

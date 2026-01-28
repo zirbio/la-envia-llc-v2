@@ -529,37 +529,38 @@ class TradingBot:
             logger.error(f"Error handling position event: {e}")
 
     async def _on_trade_confirmed(self, signal: TradeSignal):
-        """Handle confirmed trade from Telegram with managed execution using bracket orders"""
+        """Handle confirmed trade from Telegram with managed execution using OTO orders"""
         logger.info(f"Trade confirmed: {signal.signal_type.value} {signal.symbol}")
 
         # Determine order side
         entry_side = 'buy' if signal.signal_type.value == 'LONG' else 'sell'
         position_side = 'long' if signal.signal_type.value == 'LONG' else 'short'
 
-        # Execute bracket order (entry + stop loss + take profit in one atomic order)
-        # This avoids Alpaca's wash trade detection
-        bracket_result = order_executor.execute_bracket_entry(
+        # Execute OTO order (entry + stop loss only - no take profit)
+        # This avoids Alpaca's wash trade detection and allows stop modification
+        # Take profit is managed via partial close strategy at 1R
+        oto_result = await order_executor.execute_oto_entry(
             symbol=signal.symbol,
             qty=signal.position_size,
             side=entry_side,
             stop_price=signal.stop_loss,
-            take_profit_price=signal.take_profit,
             use_limit=settings.trading.use_limit_entry,
             limit_price=signal.entry_price if settings.trading.use_limit_entry else None
         )
 
-        if not bracket_result.success:
-            await telegram_bot.send_message(f"❌ Error ejecutando orden: {bracket_result.error}")
+        if not oto_result.success:
+            await telegram_bot.send_message(f"❌ Error ejecutando orden: {oto_result.error}")
             return
 
-        # Get fill price from bracket order result
-        fill_price = bracket_result.filled_price or signal.entry_price
+        # Get fill price from OTO order result
+        fill_price = oto_result.filled_price or signal.entry_price
 
-        # Get stop order ID from bracket order legs
-        stop_order_id = bracket_result.stop_order_id
+        # Get stop order ID from OTO order legs (validated in execute_oto_entry)
+        stop_order_id = oto_result.stop_order_id
 
+        # OTO entry validates stop_order_id, but double-check for safety
         if not stop_order_id:
-            logger.warning("No stop order ID returned from bracket order - position may not be protected")
+            logger.warning("No stop order ID returned from OTO order - position may not be protected")
             await telegram_bot.send_message(
                 f"⚠️ Entrada ejecutada pero no se pudo obtener ID del stop loss.\n"
                 f"Verificar orden en Alpaca dashboard."
