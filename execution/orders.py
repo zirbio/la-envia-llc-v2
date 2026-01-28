@@ -420,6 +420,27 @@ class OrderExecutor:
         try:
             order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
 
+            # Validate Alpaca's $0.01 minimum spread requirement for OTO orders
+            if use_limit and limit_price:
+                if order_side == OrderSide.SELL:  # SHORT entry
+                    # For SELL OTO: stop_loss.stop_price must be >= base_price + 0.01
+                    if stop_price < limit_price + 0.01:
+                        adjusted_limit = stop_price - 0.01
+                        logger.warning(
+                            f"Adjusting SHORT limit from ${limit_price:.2f} to ${adjusted_limit:.2f} "
+                            f"to meet Alpaca's stop spread requirement"
+                        )
+                        limit_price = adjusted_limit
+                else:  # LONG entry (BUY)
+                    # For BUY OTO: stop_loss.stop_price must be <= base_price - 0.01
+                    if stop_price > limit_price - 0.01:
+                        adjusted_limit = stop_price + 0.01
+                        logger.warning(
+                            f"Adjusting LONG limit from ${limit_price:.2f} to ${adjusted_limit:.2f} "
+                            f"to meet Alpaca's stop spread requirement"
+                        )
+                        limit_price = adjusted_limit
+
             if use_limit and limit_price:
                 order_request = LimitOrderRequest(
                     symbol=symbol,

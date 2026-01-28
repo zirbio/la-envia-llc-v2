@@ -586,9 +586,9 @@ class TradingBot:
                 # Buy limits execute at limit price or LOWER
                 limit_price = signal.entry_price * (1 + buffer_pct)
             else:
-                # For SHORT (sell limit), set limit ABOVE entry to ensure fill
+                # For SHORT (sell limit), set limit BELOW entry to ensure fill
                 # Sell limits execute at limit price or HIGHER
-                limit_price = signal.entry_price * (1 + buffer_pct)
+                limit_price = signal.entry_price * (1 - buffer_pct)
 
         oto_result = await order_executor.execute_oto_entry(
             symbol=signal.symbol,
