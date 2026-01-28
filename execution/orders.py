@@ -471,22 +471,22 @@ class OrderExecutor:
                     error="Could not extract stop_order_id from OTO order legs"
                 )
 
-            # Wait for entry fill (max 10 seconds for market orders) using async sleep
+            # Wait for entry fill (max 10 seconds) using async sleep
+            # Applies to both market and limit orders to ensure fill verification
             filled_price = None
-            if not use_limit:
-                for _ in range(10):
-                    order_status = self.client.get_order_by_id(order.id)
-                    if order_status.status == OrderStatus.FILLED:
-                        filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
-                        break
-                    elif order_status.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
-                        return BracketOrderResult(
-                            success=False,
-                            order_id=order.id,
-                            symbol=symbol,
-                            error=f"Order {order_status.status.value}"
-                        )
-                    await asyncio.sleep(1)  # Non-blocking async sleep
+            for _ in range(10):
+                order_status = self.client.get_order_by_id(order.id)
+                if order_status.status == OrderStatus.FILLED:
+                    filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
+                    break
+                elif order_status.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
+                    return BracketOrderResult(
+                        success=False,
+                        order_id=order.id,
+                        symbol=symbol,
+                        error=f"Order {order_status.status.value}"
+                    )
+                await asyncio.sleep(1)  # Non-blocking async sleep
 
             price_str = f"${filled_price:.2f}" if filled_price is not None else "pending"
             logger.info(

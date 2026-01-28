@@ -539,13 +539,25 @@ class TradingBot:
         # Execute OTO order (entry + stop loss only - no take profit)
         # This avoids Alpaca's wash trade detection and allows stop modification
         # Take profit is managed via partial close strategy at 1R
+
+        # Calculate limit price with buffer based on direction
+        limit_price = None
+        if settings.trading.use_limit_entry:
+            buffer_pct = settings.trading.limit_entry_buffer_pct
+            if signal.signal_type.value == 'LONG':
+                # For LONG (buy), set limit slightly above to ensure fill
+                limit_price = signal.entry_price * (1 + buffer_pct)
+            else:
+                # For SHORT (sell), set limit slightly below to ensure fill
+                limit_price = signal.entry_price * (1 - buffer_pct)
+
         oto_result = await order_executor.execute_oto_entry(
             symbol=signal.symbol,
             qty=signal.position_size,
             side=entry_side,
             stop_price=signal.stop_loss,
             use_limit=settings.trading.use_limit_entry,
-            limit_price=signal.entry_price if settings.trading.use_limit_entry else None
+            limit_price=limit_price
         )
 
         if not oto_result.success:
