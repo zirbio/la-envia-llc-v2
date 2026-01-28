@@ -20,7 +20,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config.settings import settings, TradingMode
 from data.market_data import market_data
-from scanner.premarket import premarket_scanner, SCAN_UNIVERSE
+from scanner.premarket import premarket_scanner, SCAN_UNIVERSE_FALLBACK
+from scanner.universe import universe_manager
 from strategy.orb import orb_strategy, TradeSignal
 from strategy.extended_hours import (
     premarket_strategy, postmarket_strategy,
@@ -276,16 +277,24 @@ class TradingBot:
         logger.info(f"Scheduled tasks configured for mode: {self.trading_mode.value}")
 
     async def _run_premarket_scan(self):
-        """Run pre-market scanner with sentiment analysis"""
+        """Run pre-market scanner with sentiment analysis using dynamic universe"""
         logger.info("Running pre-market scan with sentiment analysis...")
 
         try:
-            # Scan for candidates with sentiment analysis
-            candidates = await premarket_scanner.scan_watchlist_with_sentiment(SCAN_UNIVERSE)
+            # Build universe if not already built (e.g., if bot started after 4 AM)
+            if not universe_manager.is_cache_valid:
+                logger.info("Building universe before premarket scan...")
+                await universe_manager.build_universe()
+
+            # Scan using dynamic universe with sentiment analysis
+            candidates = await premarket_scanner.scan_dynamic_universe()
 
             if not candidates:
                 logger.warning("No candidates found in pre-market scan")
-                await telegram_bot.send_message("⚠️ No se encontraron candidatos hoy")
+                await telegram_bot.send_message(
+                    f"⚠️ No se encontraron candidatos hoy\n"
+                    f"(Escaneados: {len(universe_manager.get_cached_universe())} símbolos)"
+                )
                 return
 
             # Update watchlist
@@ -304,7 +313,12 @@ class TradingBot:
             message = premarket_scanner.format_watchlist_message()
             await telegram_bot.send_watchlist(message)
 
-            logger.info(f"Watchlist: {self.watchlist}")
+            # Log universe stats
+            stats = universe_manager.stats
+            logger.info(
+                f"Watchlist: {self.watchlist} "
+                f"(from {stats.tier3_filtered} high-volume universe)"
+            )
 
         except Exception as e:
             logger.error(f"Error in pre-market scan: {e}")
@@ -724,7 +738,7 @@ class TradingBot:
         logger.info(f"Session ended. Trades: {len(self.trades_today)}, P/L: ${total_pnl:.2f}")
 
     async def _reset_daily(self):
-        """Reset daily data"""
+        """Reset daily data and build fresh universe"""
         logger.info("Resetting daily data...")
         orb_strategy.reset_daily()
         premarket_strategy.reset_daily()
@@ -740,6 +754,21 @@ class TradingBot:
         # Clear indicator cache
         from data.indicators import indicator_cache
         indicator_cache.invalidate()
+
+        # Build fresh universe for the new day (4 AM - no Telegram notification needed)
+        logger.info("Building fresh universe for the day...")
+        universe_manager.reset()
+        try:
+            await universe_manager.build_universe(force=True)
+            stats = universe_manager.stats
+            logger.info(
+                f"Universe ready: {stats.tier3_filtered} high-volume symbols "
+                f"(build time: {stats.build_time_seconds:.1f}s)"
+            )
+        except Exception as e:
+            logger.error(f"Error building universe: {e}")
+            logger.warning("Will use fallback universe for today")
+
         logger.info("Daily reset complete")
 
     # ========== Extended Hours Methods ==========
@@ -760,6 +789,13 @@ class TradingBot:
         """Monitor watchlist for premarket Gap & Go signals"""
         logger.info("Monitoring premarket for gap opportunities...")
 
+        # Get dynamic universe or fallback
+        premarket_symbols = universe_manager.get_cached_universe()[:50]  # Top 50 for premarket
+        if not premarket_symbols:
+            premarket_symbols = SCAN_UNIVERSE_FALLBACK[:20]
+
+        logger.info(f"Premarket monitoring {len(premarket_symbols)} symbols")
+
         while self.is_running:
             try:
                 now = datetime.now(EST)
@@ -769,8 +805,8 @@ class TradingBot:
                     logger.info("Premarket trading window closed")
                     break
 
-                # Scan for premarket candidates (use existing scan universe)
-                for symbol in SCAN_UNIVERSE[:20]:  # Top 20 candidates
+                # Scan for premarket candidates using dynamic universe
+                for symbol in premarket_symbols:
                     signal = await self._check_premarket_symbol(symbol)
                     if signal:
                         await self._send_extended_hours_alert(signal)
@@ -999,6 +1035,20 @@ class TradingBot:
             await telegram_bot.send_message("🤖 *Bot iniciado*\n🔴 Mercado cerrado\nEsperando próxima apertura...")
             logger.info("Market is closed, waiting for scheduled times")
             return
+
+        # Build universe if not already built (bot started after 4 AM reset)
+        if not universe_manager.is_cache_valid:
+            logger.info("Building universe on startup...")
+            try:
+                # Pass telegram_bot.send_message as progress callback for real-time updates
+                await universe_manager.build_universe(
+                    notify_callback=telegram_bot.send_message
+                )
+            except Exception as e:
+                logger.error(f"Error building universe on startup: {e}")
+                await telegram_bot.send_message(
+                    "⚠️ Error construyendo universo dinámico, usando fallback"
+                )
 
         # Market is open, check where we are in the trading window
         if current_time >= session_end:

@@ -335,6 +335,31 @@ class PremarketScanner:
         self.premarket_context.clear()
         logger.info("Premarket scanner reset")
 
+    async def scan_dynamic_universe(self) -> list[ScanResult]:
+        """
+        Scan the dynamic universe from UniverseManager with sentiment analysis.
+
+        Uses the pre-built high-volume universe instead of hardcoded list.
+        Falls back to SCAN_UNIVERSE_FALLBACK if dynamic universe not available.
+
+        Returns:
+            List of ScanResult with sentiment scores, sorted by score
+        """
+        # Import here to avoid circular import
+        from scanner.universe import universe_manager
+
+        # Get the cached universe (or fallback)
+        universe = universe_manager.get_cached_universe()
+
+        if not universe:
+            logger.warning("No universe available, using fallback")
+            universe = SCAN_UNIVERSE_FALLBACK
+
+        logger.info(f"Scanning dynamic universe: {len(universe)} symbols")
+
+        # Use existing scan method with sentiment
+        return await self.scan_watchlist_with_sentiment(universe)
+
     def format_watchlist_message(self) -> str:
         """Format watchlist for Telegram message"""
         if not self.candidates:
@@ -363,38 +388,45 @@ class PremarketScanner:
         return "\n".join(lines)
 
 
-# Common stock universe for scanning
-# Top traded stocks by volume - good for day trading
-SCAN_UNIVERSE = [
-    # Mega caps
+# Legacy static universe - kept for backward compatibility
+# Use universe_manager.get_cached_universe() instead for dynamic universe
+# Updated 2024: Removed delisted symbols (BBBY) and low-volume tickers
+SCAN_UNIVERSE_FALLBACK = [
+    # Mega caps (highly liquid, always tradeable)
     "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA",
-    "BRK.B", "UNH", "JNJ", "XOM", "JPM", "V", "PG", "MA", "HD", "CVX",
+    "UNH", "JNJ", "XOM", "JPM", "V", "PG", "MA", "HD", "CVX",
     "MRK", "ABBV", "LLY", "PEP", "KO", "COST", "AVGO", "TMO", "MCD",
     "WMT", "CSCO", "ACN", "ABT", "DHR", "NEE", "LIN", "TXN", "PM",
     "VZ", "ADBE", "CRM", "NKE", "RTX", "HON", "QCOM", "UNP", "ORCL",
 
-    # Popular trading stocks
+    # Popular trading stocks (verified active as of 2024)
     "AMD", "INTC", "PYPL", "SQ", "SHOP", "ROKU", "SNAP", "PINS",
     "UBER", "LYFT", "ABNB", "COIN", "HOOD", "RIVN", "LCID", "NIO",
     "PLTR", "SOFI", "AFRM", "UPST", "DKNG", "PENN", "MGM", "WYNN",
-    "GME", "AMC", "BBBY", "BB", "SPCE", "PLUG", "FCEL", "BLNK",
+    "GME", "AMC", "PLUG", "FCEL",  # Removed BBBY (delisted), BB, SPCE, BLNK (low volume)
 
     # Tech growth
     "NET", "CRWD", "ZS", "DDOG", "SNOW", "MDB", "OKTA", "ZM",
     "DOCU", "TWLO", "U", "RBLX", "DASH", "PATH", "MNDY",
 
     # Biotech/Healthcare
-    "MRNA", "BNTX", "PFE", "JNJ", "BMY", "GILD", "REGN", "VRTX",
+    "MRNA", "BNTX", "PFE", "BMY", "GILD", "REGN", "VRTX",
 
     # Financial
     "GS", "MS", "BAC", "C", "WFC", "SCHW", "BLK", "AXP",
 
     # Energy
-    "OXY", "SLB", "HAL", "DVN", "PXD", "EOG", "MPC", "VLO",
+    "OXY", "SLB", "HAL", "DVN", "EOG", "MPC", "VLO",  # Removed PXD (acquired by XOM)
 
-    # ETFs for reference
+    # AI/Semiconductor (added for current market relevance)
+    "ARM", "SMCI", "MRVL", "MU", "LRCX", "AMAT", "KLAC",
+
+    # ETFs for reference (high liquidity benchmarks)
     "SPY", "QQQ", "IWM", "DIA"
 ]
+
+# Backward compatibility alias
+SCAN_UNIVERSE = SCAN_UNIVERSE_FALLBACK
 
 
 # Global scanner instance

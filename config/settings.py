@@ -301,6 +301,73 @@ class SentimentConfig:
 
 
 @dataclass
+class UniverseConfig:
+    """
+    Dynamic universe configuration for scanning all tradeable stocks.
+
+    The universe is built using tiered filtering:
+    - Tier 1: Asset filter (active, tradable, shortable) ~7000 → ~5000
+    - Tier 2: Price filter ($10-$500 by default) ~5000 → ~3000
+    - Tier 3: Volume filter (>=1M avg daily) ~3000 → ~500-800
+
+    Batch sizes are tuned for Alpaca API performance:
+    - Quote requests are lightweight: up to 1000 symbols per request
+    - Bar requests are heavier (20 days OHLCV): max 200 symbols recommended
+    """
+    # Enable/disable dynamic universe (fallback to hardcoded list if disabled)
+    enabled: bool = os.getenv("DYNAMIC_UNIVERSE_ENABLED", "true").lower() == "true"
+
+    # Cache TTL - how often to refresh the universe (hours)
+    # Default 24h: market structure doesn't change frequently
+    refresh_hours: int = int(os.getenv("UNIVERSE_REFRESH_HOURS", "24"))
+
+    # Batch sizes for API calls (with validation)
+    # Quote batch: 500 default (lightweight, Alpaca handles up to 1000)
+    price_filter_batch_size: int = int(os.getenv("PREFILTER_BATCH_SIZE", "500"))
+    # Volume batch: 100 default (heavier, each symbol returns 20 days of bars)
+    volume_filter_batch_size: int = int(os.getenv("VOLUME_PREFILTER_BATCH_SIZE", "100"))
+
+    # Tier 1: Asset filter
+    require_shortable: bool = True  # Only include shortable assets
+    max_symbol_length: int = 5  # Exclude symbols longer than this (warrants, etc.)
+
+    # Tier 2 & 3 use existing trading config values (min_price, max_price, min_avg_volume)
+
+    # Concurrency settings
+    max_concurrent_requests: int = 5  # Max concurrent API requests for batching
+
+    def __post_init__(self):
+        """Validate configuration parameters are within acceptable ranges."""
+        # Batch size validation
+        if not 50 <= self.price_filter_batch_size <= 1000:
+            raise ValueError(
+                f"price_filter_batch_size must be between 50 and 1000, "
+                f"got {self.price_filter_batch_size}. "
+                f"Larger batches may hit API limits."
+            )
+        if not 25 <= self.volume_filter_batch_size <= 200:
+            raise ValueError(
+                f"volume_filter_batch_size must be between 25 and 200, "
+                f"got {self.volume_filter_batch_size}. "
+                f"Bar requests are heavy; larger batches cause timeouts."
+            )
+
+        # Refresh hours validation
+        if not 1 <= self.refresh_hours <= 168:  # 1 hour to 1 week
+            raise ValueError(
+                f"refresh_hours must be between 1 and 168 (1 week), "
+                f"got {self.refresh_hours}"
+            )
+
+        # Symbol length validation
+        if not 1 <= self.max_symbol_length <= 10:
+            raise ValueError(
+                f"max_symbol_length must be between 1 and 10, "
+                f"got {self.max_symbol_length}"
+            )
+
+
+@dataclass
 class TradingConfig:
     """Trading parameters"""
     # Capital
@@ -453,6 +520,7 @@ class Settings:
     sentiment: SentimentConfig
     oneoff: OneOffStrategiesConfig
     extended_hours: ExtendedHoursConfig
+    universe: UniverseConfig
 
     @classmethod
     def load(cls) -> "Settings":
@@ -462,7 +530,8 @@ class Settings:
             trading=TradingConfig(),
             sentiment=SentimentConfig(),
             oneoff=OneOffStrategiesConfig(),
-            extended_hours=ExtendedHoursConfig()
+            extended_hours=ExtendedHoursConfig(),
+            universe=UniverseConfig()
         )
 
 

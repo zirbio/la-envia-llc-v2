@@ -68,6 +68,7 @@ class TradingTelegramBot:
             self.app.add_handler(CommandHandler("watchlist", self._cmd_watchlist))
             self.app.add_handler(CommandHandler("close", self._cmd_close_all))
             self.app.add_handler(CommandHandler("level", self._cmd_level))
+            self.app.add_handler(CommandHandler("universe", self._cmd_universe))
             self.app.add_handler(CommandHandler("help", self._cmd_help))
 
             # Handle text messages (for confirmations)
@@ -823,6 +824,17 @@ Buying Power: ${account.get('buying_power', 0):,.2f}
             else:
                 await update.message.reply_text("❌ Error al cambiar nivel")
 
+    async def _cmd_universe(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """Handle /universe command - show universe status and statistics"""
+        from scanner.universe import universe_manager
+
+        message = universe_manager.format_stats_message()
+        await update.message.reply_text(message, parse_mode="Markdown")
+
     async def _cmd_help(
         self,
         update: Update,
@@ -835,6 +847,7 @@ Buying Power: ${account.get('buying_power', 0):,.2f}
 /status - Ver estado del bot y cuenta
 /positions - Ver posiciones abiertas
 /watchlist - Ver watchlist del día
+/universe - Ver estado del universo dinámico
 /level - Ver/cambiar sensibilidad de señales
 /start - Reanudar el bot
 /stop - Pausar el bot

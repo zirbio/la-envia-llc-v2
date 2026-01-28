@@ -1,6 +1,7 @@
 """
 Market data retrieval from Alpaca API
 """
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pandas as pd
@@ -12,6 +13,9 @@ from alpaca.trading.enums import AssetClass, AssetStatus
 from loguru import logger
 
 from config.settings import settings
+
+# Rate limiting constants for API calls
+BATCH_DELAY_SECONDS = 0.3  # 300ms delay between batches to respect API limits
 
 
 class MarketDataClient:
@@ -595,6 +599,205 @@ class MarketDataClient:
         except Exception as e:
             logger.error(f"Error getting batch bars: {e}")
             return {}
+
+    # ========== Dynamic Universe Methods ==========
+
+    def get_tradeable_universe(self) -> list[str]:
+        """
+        Get all tradeable US equity symbols from Alpaca (Tier 1 filter).
+
+        Filters for:
+        - Active status
+        - Tradeable
+        - Shortable (optional via config)
+        - No special characters (., /)
+        - Symbol length <= max_symbol_length
+
+        Returns:
+            List of tradeable symbols (~5000)
+        """
+        try:
+            request = GetAssetsRequest(
+                asset_class=AssetClass.US_EQUITY,
+                status=AssetStatus.ACTIVE
+            )
+            assets = self.trading_client.get_all_assets(request)
+
+            universe_config = settings.universe
+            max_len = universe_config.max_symbol_length
+            require_shortable = universe_config.require_shortable
+
+            tradeable = []
+            for asset in assets:
+                # Basic tradability check
+                if not asset.tradable:
+                    continue
+
+                # Shortable check (optional)
+                if require_shortable and not asset.shortable:
+                    continue
+
+                # Exclude symbols with special characters (warrants, preferred, etc.)
+                symbol = asset.symbol
+                if any(c in symbol for c in ['.', '/', '-', '+']):
+                    continue
+
+                # Exclude long symbols (usually warrants, units, etc.)
+                if len(symbol) > max_len:
+                    continue
+
+                tradeable.append(symbol)
+
+            logger.info(f"Tier 1 - Found {len(tradeable)} tradeable assets from {len(assets)} total")
+            return tradeable
+
+        except Exception as e:
+            logger.error(f"Error getting tradeable universe: {e}")
+            return []
+
+    def prefilter_by_price_batch(
+        self,
+        symbols: list[str],
+        min_price: float,
+        max_price: float,
+        batch_size: int = 500
+    ) -> list[str]:
+        """
+        Filter symbols by current price using batch quotes (Tier 2 filter).
+
+        Uses batch size of 500 because quote requests are lightweight (single API call
+        returns current bid/ask for all symbols). Alpaca handles up to 1000 symbols
+        per quote request efficiently.
+
+        Args:
+            symbols: List of symbols to filter
+            min_price: Minimum price (e.g., $10)
+            max_price: Maximum price (e.g., $500)
+            batch_size: Symbols per API call (default 500, max recommended 1000)
+
+        Returns:
+            List of symbols within price range
+        """
+        if not symbols:
+            return []
+
+        filtered = []
+        total_batches = (len(symbols) + batch_size - 1) // batch_size
+        start_time = datetime.now()
+
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            batch_num = i // batch_size + 1
+
+            # Rate limiting: add delay between batches to respect API limits
+            if batch_num > 1:
+                time.sleep(BATCH_DELAY_SECONDS)
+
+            try:
+                quotes = self.get_latest_quotes_batch(batch)
+
+                for symbol, quote in quotes.items():
+                    price = quote.get('mid', 0)
+                    if price and min_price <= price <= max_price:
+                        filtered.append(symbol)
+
+                # Progress logging every 5 batches or at end
+                if batch_num % 5 == 0 or batch_num == total_batches:
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.debug(
+                        f"Tier 2 - Price filter batch {batch_num}/{total_batches}: "
+                        f"{len(filtered)} symbols in range ({elapsed:.1f}s elapsed)"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Error in price filter batch {batch_num}: {e}")
+                continue
+
+        logger.info(
+            f"Tier 2 - Price filter complete: {len(filtered)}/{len(symbols)} symbols "
+            f"in ${min_price}-${max_price} range"
+        )
+        return filtered
+
+    def prefilter_by_avg_volume_batch(
+        self,
+        symbols: list[str],
+        min_avg_volume: int,
+        batch_size: int = 100,
+        lookback_days: int = 20
+    ) -> list[str]:
+        """
+        Filter symbols by average daily volume using batch bars (Tier 3 filter).
+
+        Uses smaller batch size of 100 because daily bars requests are heavier:
+        - Each symbol returns 20 days of OHLCV data
+        - Response payload is ~20x larger than quotes
+        - Alpaca recommends smaller batches for historical data
+
+        Args:
+            symbols: List of symbols to filter
+            min_avg_volume: Minimum average daily volume (e.g., 1,000,000)
+            batch_size: Symbols per API call (default 100, max recommended 200)
+            lookback_days: Days to average volume over
+
+        Returns:
+            List of symbols meeting volume threshold
+        """
+        if not symbols:
+            return []
+
+        filtered = []
+        total_batches = (len(symbols) + batch_size - 1) // batch_size
+        start_time = datetime.now()
+
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            batch_num = i // batch_size + 1
+
+            # Rate limiting: add delay between batches to respect API limits
+            # Longer delay for bars (heavier requests)
+            if batch_num > 1:
+                time.sleep(BATCH_DELAY_SECONDS * 2)  # 600ms for heavier requests
+
+            try:
+                # Get daily bars for batch
+                start = datetime.now() - timedelta(days=lookback_days + 7)
+
+                request = StockBarsRequest(
+                    symbol_or_symbols=batch,
+                    timeframe=TimeFrame.Day,
+                    start=start,
+                    limit=lookback_days
+                )
+
+                bars = self.data_client.get_stock_bars(request)
+
+                for symbol in batch:
+                    if symbol in bars.data and bars.data[symbol]:
+                        volumes = [int(bar.volume) for bar in bars.data[symbol]]
+                        if volumes:
+                            avg_vol = sum(volumes) / len(volumes)
+                            if avg_vol >= min_avg_volume:
+                                filtered.append(symbol)
+
+                # Progress logging every 10 batches or at end
+                if batch_num % 10 == 0 or batch_num == total_batches:
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    pct_complete = (batch_num / total_batches) * 100
+                    logger.info(
+                        f"Tier 3 - Volume filter: {batch_num}/{total_batches} batches "
+                        f"({pct_complete:.0f}%) - {len(filtered)} high-volume symbols ({elapsed:.0f}s)"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Error in volume filter batch {batch_num}: {e}")
+                continue
+
+        logger.info(
+            f"Tier 3 - Volume filter complete: {len(filtered)}/{len(symbols)} symbols "
+            f"with avg volume >= {min_avg_volume:,}"
+        )
+        return filtered
 
 
 # Global client instance
