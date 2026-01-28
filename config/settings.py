@@ -354,6 +354,7 @@ class TradingConfig:
     # Execution (Phase 5)
     use_limit_entry: bool = True
     limit_entry_buffer_pct: float = 0.001  # 0.1%
+    limit_order_fill_timeout: int = 30  # seconds to wait for limit order fill
     stop_atr_multiplier: float = 1.5
 
     # Risk management (Phase 6)

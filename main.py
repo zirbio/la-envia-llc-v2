@@ -545,11 +545,13 @@ class TradingBot:
         if settings.trading.use_limit_entry:
             buffer_pct = settings.trading.limit_entry_buffer_pct
             if signal.signal_type.value == 'LONG':
-                # For LONG (buy), set limit slightly above to ensure fill
+                # For LONG (buy limit), set limit ABOVE entry to ensure fill
+                # Buy limits execute at limit price or LOWER
                 limit_price = signal.entry_price * (1 + buffer_pct)
             else:
-                # For SHORT (sell), set limit slightly below to ensure fill
-                limit_price = signal.entry_price * (1 - buffer_pct)
+                # For SHORT (sell limit), set limit ABOVE entry to ensure fill
+                # Sell limits execute at limit price or HIGHER
+                limit_price = signal.entry_price * (1 + buffer_pct)
 
         oto_result = await order_executor.execute_oto_entry(
             symbol=signal.symbol,

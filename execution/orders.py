@@ -471,11 +471,13 @@ class OrderExecutor:
                     error="Could not extract stop_order_id from OTO order legs"
                 )
 
-            # Wait for entry fill (max 10 seconds) using async sleep
-            # Applies to both market and limit orders to ensure fill verification
+            # Wait for entry fill using async sleep
+            # Use longer timeout for limit orders since they may not fill immediately
+            max_wait = settings.trading.limit_order_fill_timeout if use_limit else 10
             filled_price = None
-            for _ in range(10):
-                order_status = self.client.get_order_by_id(order.id)
+            for _ in range(max_wait):
+                # Use asyncio.to_thread to avoid blocking the event loop
+                order_status = await asyncio.to_thread(self.client.get_order_by_id, order.id)
                 if order_status.status == OrderStatus.FILLED:
                     filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
                     break
@@ -635,7 +637,8 @@ class OrderExecutor:
 
             # Wait for fill (max 10 seconds) to get actual fill price using async sleep
             for _ in range(10):
-                order_status = self.client.get_order_by_id(order.id)
+                # Use asyncio.to_thread to avoid blocking the event loop
+                order_status = await asyncio.to_thread(self.client.get_order_by_id, order.id)
                 if order_status.status == OrderStatus.FILLED:
                     filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
                     price_str = f"${filled_price:.2f}" if filled_price is not None else "N/A"
