@@ -790,9 +790,10 @@ class ORBStrategy:
     ) -> TradeSignal:
         """Create a LONG trade signal"""
         # Phase 5: Use hybrid stop (tighter of ORB or ATR-based)
-        stop_loss = self._calculate_hybrid_stop(symbol, entry_price, orb, 'LONG')
+        # Round all prices to 2 decimals for consistency with Alpaca
+        stop_loss = round(self._calculate_hybrid_stop(symbol, entry_price, orb, 'LONG'), 2)
         risk_per_share = entry_price - stop_loss
-        take_profit = entry_price + (risk_per_share * self.config.reward_risk_ratio)
+        take_profit = round(entry_price + (risk_per_share * self.config.reward_risk_ratio), 2)
 
         position_size, risk_amount = self._calculate_position_size_kelly(
             entry_price, stop_loss
@@ -853,9 +854,10 @@ class ORBStrategy:
     ) -> TradeSignal:
         """Create a SHORT trade signal"""
         # Phase 5: Use hybrid stop (tighter of ORB or ATR-based)
-        stop_loss = self._calculate_hybrid_stop(symbol, entry_price, orb, 'SHORT')
+        # Round all prices to 2 decimals for consistency with Alpaca
+        stop_loss = round(self._calculate_hybrid_stop(symbol, entry_price, orb, 'SHORT'), 2)
         risk_per_share = stop_loss - entry_price
-        take_profit = entry_price - (risk_per_share * self.config.reward_risk_ratio)
+        take_profit = round(entry_price - (risk_per_share * self.config.reward_risk_ratio), 2)
 
         position_size, risk_amount = self._calculate_position_size_kelly(
             entry_price, stop_loss

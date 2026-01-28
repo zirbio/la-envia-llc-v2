@@ -182,6 +182,44 @@ Reply *SI* para ejecutar, *NO* para skip
 
         return await self.send_message(message.strip())
 
+    async def send_auto_execution_notification(self, signal: TradeSignal, fill_price: float) -> bool:
+        """
+        Send informative notification for automatic execution (no confirmation buttons)
+
+        Args:
+            signal: TradeSignal that was executed
+            fill_price: Actual fill price from the order
+
+        Returns:
+            True if sent successfully
+        """
+        is_long = signal.signal_type == SignalType.LONG
+        emoji = "🟢" if is_long else "🔴"
+        direction = signal.signal_type.value
+
+        risk_pct = (signal.risk_amount / settings.trading.max_capital) * 100
+        reward = signal.risk_amount * settings.trading.reward_risk_ratio
+
+        # Get quality level badge
+        quality_badge = self._get_quality_badge(signal.quality_level)
+
+        message = f"""
+{emoji} *EJECUTADO: {direction} {signal.symbol}*
+
+{quality_badge} Score: {signal.signal_score:.0f}/100 → *{signal.quality_level}*
+
+*Entry:* ${fill_price:.2f}
+*Stop Loss:* ${signal.stop_loss:.2f}
+*Take Profit:* ${signal.take_profit:.2f}
+*Position:* {signal.position_size} shares
+
+*Risk:* ${signal.risk_amount:.2f} ({risk_pct:.1f}%)
+*Reward:* ${reward:.2f} (2:1)
+
+📊 *Gestión de posición activada*
+        """
+        return await self.send_message(message.strip())
+
     def _get_quality_badge(self, quality_level: str) -> str:
         """Get emoji badge for quality level"""
         badges = {
@@ -299,8 +337,10 @@ Reply *SI* para ejecutar, *NO* para skip
         price: float
     ) -> bool:
         """Send order execution confirmation"""
-        emoji = "🟢" if side.upper() == "BUY" else "🔴"
-        action = "Comprado" if side.upper() == "BUY" else "Vendido"
+        # Handle both BUY/SELL and LONG/SHORT nomenclature
+        is_long = side.upper() in ("BUY", "LONG")
+        emoji = "🟢" if is_long else "🔴"
+        action = "Comprado" if is_long else "Vendido"
 
         message = f"""
 ✅ *Orden Ejecutada*

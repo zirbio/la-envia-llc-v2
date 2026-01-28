@@ -107,7 +107,8 @@ class PositionManager:
         signal: TradeSignal,
         fill_price: float,
         qty: int,
-        stop_order_id: str
+        stop_order_id: str,
+        actual_stop_price: float = None
     ) -> ManagedPosition:
         """
         Register a new position for management
@@ -117,12 +118,17 @@ class PositionManager:
             fill_price: Actual fill price
             qty: Filled quantity
             stop_order_id: ID of the stop loss order
+            actual_stop_price: Actual stop price sent to Alpaca (for 1R consistency)
 
         Returns:
             ManagedPosition object
         """
         side = 'long' if signal.signal_type == SignalType.LONG else 'short'
-        risk_per_share = abs(fill_price - signal.stop_loss)
+
+        # Use actual stop price if provided, otherwise use signal's stop_loss
+        effective_stop = actual_stop_price if actual_stop_price is not None else signal.stop_loss
+
+        risk_per_share = abs(fill_price - effective_stop)
         risk_amount = risk_per_share * qty
 
         position = ManagedPosition(
@@ -130,11 +136,11 @@ class PositionManager:
             side=side,
             original_qty=qty,
             entry_price=fill_price,
-            original_stop_loss=signal.stop_loss,
+            original_stop_loss=effective_stop,
             risk_amount=risk_amount,
             state=PositionState.OPEN,
             current_qty=qty,
-            current_stop_loss=signal.stop_loss,
+            current_stop_loss=effective_stop,
             current_stop_order_id=stop_order_id
         )
 
@@ -142,7 +148,7 @@ class PositionManager:
 
         logger.info(
             f"Position registered: {side.upper()} {qty} {signal.symbol} "
-            f"@ ${fill_price:.2f}, stop ${signal.stop_loss:.2f}, "
+            f"@ ${fill_price:.2f}, stop ${effective_stop:.2f}, "
             f"1R = ${risk_amount:.2f}"
         )
 

@@ -410,6 +410,14 @@ class TradingBot:
     async def _check_symbol(self, symbol: str) -> Optional[TradeSignal]:
         """Check a symbol for breakout signal"""
         try:
+            # Skip if already have an active position for this symbol
+            if position_manager.get_position(symbol) is not None:
+                return None
+
+            # Skip if there's a pending confirmation for this symbol (only in manual mode)
+            if settings.trading.execution_mode == "manual" and symbol in telegram_bot.pending_signals:
+                return None
+
             # Get current quote
             quote = market_data.get_latest_quote(symbol)
             if not quote:
@@ -437,7 +445,19 @@ class TradingBot:
 
             if signal:
                 logger.info(f"Signal detected for {symbol}")
-                await telegram_bot.send_signal_alert(signal)
+
+                if settings.trading.execution_mode == "auto":
+                    # AUTO mode: execute immediately without confirmation
+                    await self._on_trade_confirmed(signal)
+                    # Get the fill price from the position manager
+                    position = position_manager.get_position(symbol)
+                    fill_price = position.entry_price if position else signal.entry_price
+                    # Send informative notification (no buttons)
+                    await telegram_bot.send_auto_execution_notification(signal, fill_price)
+                else:
+                    # MANUAL mode: send alert and wait for confirmation
+                    await telegram_bot.send_signal_alert(signal)
+
                 return signal
 
             return None
@@ -580,12 +600,14 @@ class TradingBot:
                 f"Verificar orden en Alpaca dashboard."
             )
 
-        # Register position for management
+        # Register position for management with actual stop price for 1R consistency
+        actual_stop_price = round(signal.stop_loss, 2)
         await position_manager.register_position(
             signal=signal,
             fill_price=fill_price,
             qty=signal.position_size,
-            stop_order_id=stop_order_id
+            stop_order_id=stop_order_id,
+            actual_stop_price=actual_stop_price
         )
 
         # Send confirmation
