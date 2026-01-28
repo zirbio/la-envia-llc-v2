@@ -24,7 +24,7 @@ except ImportError:
 
 try:
     from prompt_toolkit import prompt
-    from prompt_toolkit.shortcuts import clear
+    from prompt_toolkit.shortcuts import clear, prompt_async
     PROMPT_TOOLKIT_AVAILABLE = True
 except ImportError:
     PROMPT_TOOLKIT_AVAILABLE = False
@@ -93,6 +93,20 @@ class CLIApp:
             # 'cls' for Windows, 'clear' for Unix/macOS
             os.system('cls' if os.name == 'nt' else 'clear')
 
+    async def _prompt(self, message: str) -> str:
+        """Async-safe prompt that works inside a running event loop."""
+        if PROMPT_TOOLKIT_AVAILABLE:
+            try:
+                return (await prompt_async(message)).strip()
+            except Exception:
+                # Fall back to basic input if prompt_toolkit fails under this runtime.
+                pass
+        return (await asyncio.to_thread(input, message)).strip()
+
+    async def _pause(self, message: str = "Presione Enter para continuar..."):
+        """Pause for user input in an async-safe way."""
+        await self._prompt(message)
+
     def _get_market_status(self) -> tuple[str, str]:
         """Get current market status"""
         try:
@@ -148,7 +162,7 @@ class CLIApp:
         )
         self.console.print(panel)
 
-    def _display_main_menu(self) -> str:
+    async def _display_main_menu(self) -> str:
         """Display main menu and get selection"""
         current_time = get_current_dual_time()
 
@@ -163,7 +177,7 @@ class CLIApp:
             print("6. Estado de cuenta")
             print("7. Salir")
             print(f"\n⏰ Hora actual: {current_time}")
-            return input("\nSeleccione [1-7]: ").strip()
+            return await self._prompt("\nSeleccione [1-7]: ")
 
         # Create menu table
         table = Table(
@@ -198,11 +212,9 @@ class CLIApp:
 
         # Get input
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            return prompt("Seleccione [1-7]: ").strip()
-        return input("Seleccione [1-7]: ").strip()
+        return await self._prompt("Seleccione [1-7]: ")
 
-    def _display_config_menu(self) -> str:
+    async def _display_config_menu(self) -> str:
         """Display configuration menu"""
         current_level = settings.trading.signal_level.value
         current_exec_mode = settings.trading.execution_mode.upper()
@@ -213,7 +225,7 @@ class CLIApp:
             print("2. Cambiar modo de ejecución (AUTO/MANUAL)")
             print("3. Ver parámetros actuales")
             print("4. Volver")
-            return input("\nSeleccione [1-4]: ").strip()
+            return await self._prompt("\nSeleccione [1-4]: ")
 
         table = Table(show_header=False, box=box.ROUNDED, border_style="yellow")
         table.add_column("Opción", style="cyan", width=4)
@@ -233,11 +245,9 @@ class CLIApp:
         self.console.print(panel)
 
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            return prompt("Seleccione [1-4]: ").strip()
-        return input("Seleccione [1-4]: ").strip()
+        return await self._prompt("Seleccione [1-4]: ")
 
-    def _display_signal_level_menu(self) -> str:
+    async def _display_signal_level_menu(self) -> str:
         """Display signal level selection"""
         if not RICH_AVAILABLE:
             print("\nSELECCIONE NIVEL DE SEÑAL:")
@@ -245,7 +255,7 @@ class CLIApp:
             print("2. MODERATE - Balanceado (default)")
             print("3. RELAXED - Agresivo, más señales")
             print("4. Cancelar")
-            return input("\nSeleccione [1-4]: ").strip()
+            return await self._prompt("\nSeleccione [1-4]: ")
 
         table = Table(show_header=True, box=box.ROUNDED, border_style="green")
         table.add_column("", style="cyan", width=4)
@@ -263,11 +273,9 @@ class CLIApp:
         self.console.print(panel)
 
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            return prompt("Seleccione [1-4]: ").strip()
-        return input("Seleccione [1-4]: ").strip()
+        return await self._prompt("Seleccione [1-4]: ")
 
-    def _display_execution_mode_menu(self) -> str:
+    async def _display_execution_mode_menu(self) -> str:
         """Display execution mode selection"""
         current_mode = settings.trading.execution_mode.upper()
 
@@ -276,7 +284,7 @@ class CLIApp:
             print("1. AUTO - Ejecuta señales automáticamente sin confirmación")
             print("2. MANUAL - Envía alerta a Telegram y espera confirmación SI/NO")
             print("3. Cancelar")
-            return input("\nSeleccione [1-3]: ").strip()
+            return await self._prompt("\nSeleccione [1-3]: ")
 
         table = Table(show_header=True, box=box.ROUNDED, border_style="magenta")
         table.add_column("", style="cyan", width=4)
@@ -294,11 +302,9 @@ class CLIApp:
         self.console.print(panel)
 
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            return prompt("Seleccione [1-3]: ").strip()
-        return input("Seleccione [1-3]: ").strip()
+        return await self._prompt("Seleccione [1-3]: ")
 
-    def _display_account_status(self):
+    async def _display_account_status(self):
         """Display account status"""
         account = order_executor.get_account()
         positions = order_executor.get_positions()
@@ -315,7 +321,7 @@ class CLIApp:
             print(f"\nPosiciones: {len(positions)}")
             for pos in positions:
                 print(f"  {pos.symbol}: {pos.qty} @ ${pos.entry_price:.2f} ({pos.unrealized_pl_pct:+.1f}%)")
-            input("\nPresione Enter para continuar...")
+            await self._pause("\nPresione Enter para continuar...")
             return
 
         # Account info table
@@ -363,12 +369,9 @@ class CLIApp:
             self.console.print(Panel("Sin posiciones abiertas", style="dim"))
 
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            prompt("Presione Enter para continuar...")
-        else:
-            input("Presione Enter para continuar...")
+        await self._pause("Presione Enter para continuar...")
 
-    def _display_current_params(self):
+    async def _display_current_params(self):
         """Display current trading parameters"""
         config = settings.trading.signal_config
         exec_mode = settings.trading.execution_mode.upper()
@@ -383,7 +386,7 @@ class CLIApp:
             print(f"  RSI Bounds: {config.rsi_oversold} - {config.rsi_overbought}")
             print(f"  Sentiment Long: >= {config.min_sentiment_long}")
             print(f"  Sentiment Short: <= {config.max_sentiment_short}")
-            input("\nPresione Enter para continuar...")
+            await self._pause("\nPresione Enter para continuar...")
             return
 
         table = Table(show_header=True, box=box.ROUNDED, border_style="magenta")
@@ -413,22 +416,19 @@ class CLIApp:
         self.console.print(panel)
 
         self.console.print()
-        if PROMPT_TOOLKIT_AVAILABLE:
-            prompt("Presione Enter para continuar...")
-        else:
-            input("Presione Enter para continuar...")
+        await self._pause("Presione Enter para continuar...")
 
-    def _handle_config_menu(self):
+    async def _handle_config_menu(self):
         """Handle configuration menu"""
         while True:
             self._clear()
             self._display_header()
-            choice = self._display_config_menu()
+            choice = await self._display_config_menu()
 
             if choice == '1':
                 self._clear()
                 self._display_header()
-                level_choice = self._display_signal_level_menu()
+                level_choice = await self._display_signal_level_menu()
 
                 level_map = {
                     '1': SignalLevel.STRICT,
@@ -442,14 +442,14 @@ class CLIApp:
                     self._print(f"\n[green]Nivel cambiado a {level_map[level_choice].value}[/green]" if RICH_AVAILABLE
                                else f"\nNivel cambiado a {level_map[level_choice].value}")
                     if PROMPT_TOOLKIT_AVAILABLE:
-                        prompt("Presione Enter para continuar...")
+                        await self._pause("Presione Enter para continuar...")
                     else:
-                        input("Presione Enter para continuar...")
+                        await self._pause("Presione Enter para continuar...")
 
             elif choice == '2':
                 self._clear()
                 self._display_header()
-                exec_choice = self._display_execution_mode_menu()
+                exec_choice = await self._display_execution_mode_menu()
 
                 exec_map = {
                     '1': 'auto',
@@ -461,14 +461,14 @@ class CLIApp:
                     self._print(f"\n[green]Modo de ejecución cambiado a {exec_map[exec_choice].upper()}[/green]" if RICH_AVAILABLE
                                else f"\nModo de ejecución cambiado a {exec_map[exec_choice].upper()}")
                     if PROMPT_TOOLKIT_AVAILABLE:
-                        prompt("Presione Enter para continuar...")
+                        await self._pause("Presione Enter para continuar...")
                     else:
-                        input("Presione Enter para continuar...")
+                        await self._pause("Presione Enter para continuar...")
 
             elif choice == '3':
                 self._clear()
                 self._display_header()
-                self._display_current_params()
+                await self._display_current_params()
 
             elif choice == '4' or choice == '':
                 break
@@ -488,7 +488,7 @@ class CLIApp:
         while self.running:
             self._clear()
             self._display_header()
-            choice = self._display_main_menu()
+            choice = await self._display_main_menu()
 
             mode_map = {
                 '1': TradingMode.REGULAR,
@@ -505,12 +505,12 @@ class CLIApp:
                 return self.selected_mode
 
             elif choice == '5':
-                self._handle_config_menu()
+                await self._handle_config_menu()
 
             elif choice == '6':
                 self._clear()
                 self._display_header()
-                self._display_account_status()
+                await self._display_account_status()
 
             elif choice == '7':
                 self._print("\nSaliendo..." if RICH_AVAILABLE else "\nSaliendo...")
