@@ -443,11 +443,32 @@ class TradingBot:
 
                 # If price deviates more than 50% from ORB midpoint, likely bad data
                 if price_deviation_pct > 0.5:
-                    logger.warning(
-                        f"{symbol}: Price ${current_price:.2f} too far from ORB "
-                        f"(${orb.low:.2f}-${orb.high:.2f}), deviation={price_deviation_pct:.1%}, skipping"
-                    )
-                    return None
+                    quote_age = quote.get('age_seconds', 0)
+
+                    # Try fallback to last bar close
+                    if not bars.empty:
+                        bar_close = float(bars['close'].iloc[-1])
+                        bar_deviation = abs(bar_close - orb_mid) / orb_mid
+
+                        if bar_deviation <= 0.5:
+                            logger.warning(
+                                f"{symbol}: Quote ${current_price:.2f} (age={quote_age:.0f}s) anomalous, "
+                                f"using bar close ${bar_close:.2f} instead"
+                            )
+                            current_price = bar_close
+                        else:
+                            logger.warning(
+                                f"{symbol}: Both quote ${current_price:.2f} (age={quote_age:.0f}s) and "
+                                f"bar close ${bar_close:.2f} anomalous vs ORB "
+                                f"(${orb.low:.2f}-${orb.high:.2f}), skipping"
+                            )
+                            return None
+                    else:
+                        logger.warning(
+                            f"{symbol}: Price ${current_price:.2f} (age={quote_age:.0f}s) too far from ORB "
+                            f"(${orb.low:.2f}-${orb.high:.2f}), deviation={price_deviation_pct:.1%}, skipping"
+                        )
+                        return None
 
             # Check for breakout
             signal = orb_strategy.check_breakout(

@@ -1,7 +1,7 @@
 """
 Market data retrieval from Alpaca API
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import pandas as pd
 from alpaca.data import StockHistoricalDataClient, StockBarsRequest, StockLatestQuoteRequest
@@ -88,13 +88,13 @@ class MarketDataClient:
 
     def get_latest_quote(self, symbol: str) -> Optional[dict]:
         """
-        Get latest quote for a symbol
+        Get latest quote for a symbol with freshness validation
 
         Args:
             symbol: Stock symbol
 
         Returns:
-            Dict with bid, ask, and mid price
+            Dict with bid, ask, mid price, timestamp, and age_seconds
         """
         try:
             request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
@@ -104,14 +104,35 @@ class MarketDataClient:
                 return None
 
             quote = quotes[symbol]
+            quote_time = quote.timestamp
+            now = datetime.now(timezone.utc)
+            age_seconds = (now - quote_time).total_seconds()
+
+            bid = float(quote.bid_price)
+            ask = float(quote.ask_price)
+            mid = (bid + ask) / 2
+
+            # Log quote details for debugging
+            logger.debug(
+                f"{symbol} quote: bid=${bid:.2f}, ask=${ask:.2f}, "
+                f"mid=${mid:.2f}, age={age_seconds:.1f}s"
+            )
+
+            # Warn if quote is stale (>60 seconds old)
+            if age_seconds > 60:
+                logger.warning(
+                    f"{symbol}: Quote is {age_seconds:.0f}s old, may be stale"
+                )
+
             return {
                 'symbol': symbol,
-                'bid': float(quote.bid_price),
-                'ask': float(quote.ask_price),
-                'mid': (float(quote.bid_price) + float(quote.ask_price)) / 2,
+                'bid': bid,
+                'ask': ask,
+                'mid': mid,
                 'bid_size': int(quote.bid_size),
                 'ask_size': int(quote.ask_size),
-                'timestamp': quote.timestamp
+                'timestamp': quote_time,
+                'age_seconds': age_seconds
             }
 
         except Exception as e:
@@ -469,7 +490,7 @@ class MarketDataClient:
             symbols: List of stock symbols
 
         Returns:
-            Dict mapping symbol to quote data (bid, ask, mid, etc.)
+            Dict mapping symbol to quote data (bid, ask, mid, age_seconds, etc.)
         """
         if not symbols:
             return {}
@@ -478,7 +499,10 @@ class MarketDataClient:
             request = StockLatestQuoteRequest(symbol_or_symbols=symbols)
             quotes = self.data_client.get_stock_latest_quote(request)
 
+            now = datetime.now(timezone.utc)
             result = {}
+            stale_count = 0
+
             for symbol in symbols:
                 if symbol in quotes:
                     quote = quotes[symbol]
@@ -486,6 +510,13 @@ class MarketDataClient:
                     ask = float(quote.ask_price) if quote.ask_price else 0.0
                     # Avoid division by zero during market halts or for illiquid stocks
                     mid = (bid + ask) / 2 if (bid + ask) > 0 else 0.0
+
+                    quote_time = quote.timestamp
+                    age_seconds = (now - quote_time).total_seconds() if quote_time else 0.0
+
+                    if age_seconds > 60:
+                        stale_count += 1
+
                     result[symbol] = {
                         'symbol': symbol,
                         'bid': bid,
@@ -493,8 +524,12 @@ class MarketDataClient:
                         'mid': mid,
                         'bid_size': int(quote.bid_size) if quote.bid_size else 0,
                         'ask_size': int(quote.ask_size) if quote.ask_size else 0,
-                        'timestamp': quote.timestamp
+                        'timestamp': quote_time,
+                        'age_seconds': age_seconds
                     }
+
+            if stale_count > 0:
+                logger.warning(f"Batch quotes: {stale_count}/{len(result)} quotes are >60s old")
 
             logger.debug(f"Fetched {len(result)}/{len(symbols)} quotes in batch")
             return result
