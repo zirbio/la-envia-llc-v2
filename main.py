@@ -1055,7 +1055,8 @@ async def main():
         asyncio.create_task(bot.stop())
 
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    if sys.platform != 'win32':
+        signal.signal(signal.SIGTERM, signal_handler)
 
     await bot.start()
 
