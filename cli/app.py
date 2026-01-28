@@ -205,33 +205,37 @@ class CLIApp:
     def _display_config_menu(self) -> str:
         """Display configuration menu"""
         current_level = settings.trading.signal_level.value
+        current_exec_mode = settings.trading.execution_mode.upper()
 
         if not RICH_AVAILABLE:
-            print(f"\nCONFIGURACIÓN (Nivel actual: {current_level})")
+            print(f"\nCONFIGURACIÓN (Nivel: {current_level} | Ejecución: {current_exec_mode})")
             print("1. Cambiar nivel de señal")
-            print("2. Ver parámetros actuales")
-            print("3. Volver")
-            return input("\nSeleccione [1-3]: ").strip()
+            print("2. Cambiar modo de ejecución (AUTO/MANUAL)")
+            print("3. Ver parámetros actuales")
+            print("4. Volver")
+            return input("\nSeleccione [1-4]: ").strip()
 
         table = Table(show_header=False, box=box.ROUNDED, border_style="yellow")
         table.add_column("Opción", style="cyan", width=4)
         table.add_column("Descripción")
 
+        exec_mode_desc = f"Cambiar modo de ejecución (actual: {current_exec_mode})"
         table.add_row("1", "Cambiar nivel de señal")
-        table.add_row("2", "Ver parámetros actuales")
-        table.add_row("3", "Volver")
+        table.add_row("2", exec_mode_desc)
+        table.add_row("3", "Ver parámetros actuales")
+        table.add_row("4", "Volver")
 
         panel = Panel(
             table,
-            title=f"[bold]CONFIGURACIÓN[/bold] (Nivel: {current_level})",
+            title=f"[bold]CONFIGURACIÓN[/bold] (Nivel: {current_level} | Ejecución: {current_exec_mode})",
             border_style="yellow"
         )
         self.console.print(panel)
 
         self.console.print()
         if PROMPT_TOOLKIT_AVAILABLE:
-            return prompt("Seleccione [1-3]: ").strip()
-        return input("Seleccione [1-3]: ").strip()
+            return prompt("Seleccione [1-4]: ").strip()
+        return input("Seleccione [1-4]: ").strip()
 
     def _display_signal_level_menu(self) -> str:
         """Display signal level selection"""
@@ -262,6 +266,37 @@ class CLIApp:
         if PROMPT_TOOLKIT_AVAILABLE:
             return prompt("Seleccione [1-4]: ").strip()
         return input("Seleccione [1-4]: ").strip()
+
+    def _display_execution_mode_menu(self) -> str:
+        """Display execution mode selection"""
+        current_mode = settings.trading.execution_mode.upper()
+
+        if not RICH_AVAILABLE:
+            print(f"\nMODO DE EJECUCIÓN (actual: {current_mode})")
+            print("1. AUTO - Ejecuta señales automáticamente sin confirmación")
+            print("2. MANUAL - Envía alerta a Telegram y espera confirmación SI/NO")
+            print("3. Cancelar")
+            return input("\nSeleccione [1-3]: ").strip()
+
+        table = Table(show_header=True, box=box.ROUNDED, border_style="magenta")
+        table.add_column("", style="cyan", width=4)
+        table.add_column("Modo", style="bold")
+        table.add_column("Descripción")
+
+        auto_marker = "[bold green]← actual[/]" if current_mode == "AUTO" else ""
+        manual_marker = "[bold green]← actual[/]" if current_mode == "MANUAL" else ""
+
+        table.add_row("1", f"AUTO {auto_marker}", "Ejecuta señales automáticamente sin confirmación")
+        table.add_row("2", f"MANUAL {manual_marker}", "Envía alerta a Telegram y espera SI/NO")
+        table.add_row("3", "Cancelar", "")
+
+        panel = Panel(table, title=f"[bold]MODO DE EJECUCIÓN[/bold]", border_style="magenta")
+        self.console.print(panel)
+
+        self.console.print()
+        if PROMPT_TOOLKIT_AVAILABLE:
+            return prompt("Seleccione [1-3]: ").strip()
+        return input("Seleccione [1-3]: ").strip()
 
     def _display_account_status(self):
         """Display account status"""
@@ -336,9 +371,11 @@ class CLIApp:
     def _display_current_params(self):
         """Display current trading parameters"""
         config = settings.trading.signal_config
+        exec_mode = settings.trading.execution_mode.upper()
 
         if not RICH_AVAILABLE:
-            print(f"\nPARÁMETROS ACTUALES (Nivel: {settings.trading.signal_level.value})")
+            print(f"\nPARÁMETROS ACTUALES (Nivel: {settings.trading.signal_level.value} | Ejecución: {exec_mode})")
+            print(f"  Modo Ejecución: {exec_mode}")
             print(f"  Min Signal Score: {config.min_signal_score}")
             print(f"  Min RVOL: {config.min_relative_volume}x")
             print(f"  ORB Range: {config.min_orb_range_pct}% - {config.max_orb_range_pct}%")
@@ -353,6 +390,10 @@ class CLIApp:
         table.add_column("Parámetro")
         table.add_column("Valor", justify="right")
 
+        # Execution mode at the top for visibility
+        exec_style = "[bold green]AUTO[/]" if exec_mode == "AUTO" else "[bold yellow]MANUAL[/]"
+        table.add_row("Modo Ejecución", exec_style)
+        table.add_row("", "")  # Separator
         table.add_row("Min Signal Score", str(config.min_signal_score))
         table.add_row("Min RVOL", f"{config.min_relative_volume}x")
         table.add_row("ORB Range Min", f"{config.min_orb_range_pct}%")
@@ -408,9 +449,28 @@ class CLIApp:
             elif choice == '2':
                 self._clear()
                 self._display_header()
+                exec_choice = self._display_execution_mode_menu()
+
+                exec_map = {
+                    '1': 'auto',
+                    '2': 'manual'
+                }
+
+                if exec_choice in exec_map:
+                    settings.trading.execution_mode = exec_map[exec_choice]
+                    self._print(f"\n[green]Modo de ejecución cambiado a {exec_map[exec_choice].upper()}[/green]" if RICH_AVAILABLE
+                               else f"\nModo de ejecución cambiado a {exec_map[exec_choice].upper()}")
+                    if PROMPT_TOOLKIT_AVAILABLE:
+                        prompt("Presione Enter para continuar...")
+                    else:
+                        input("Presione Enter para continuar...")
+
+            elif choice == '3':
+                self._clear()
+                self._display_header()
                 self._display_current_params()
 
-            elif choice == '3' or choice == '':
+            elif choice == '4' or choice == '':
                 break
 
     async def run(self) -> Optional[TradingMode]:

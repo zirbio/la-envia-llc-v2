@@ -382,6 +382,14 @@ class TradingConfig:
     # Set to False to restore previous behavior (only show signals meeting threshold)
     show_all_signals: bool = True
 
+    # Execution mode: "auto" executes immediately, "manual" requires Telegram confirmation
+    # Load from environment, default to "auto"
+    execution_mode: str = field(
+        default_factory=lambda: os.getenv("EXECUTION_MODE", "auto").lower()
+        if os.getenv("EXECUTION_MODE", "auto").lower() in ["auto", "manual"]
+        else "auto"
+    )
+
     @property
     def signal_config(self) -> SignalLevelConfig:
         """Get the active signal level configuration"""
