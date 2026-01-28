@@ -60,6 +60,21 @@ class OrderResult:
     error: Optional[str] = None
 
 
+@dataclass
+class BracketOrderResult:
+    """Result of bracket order execution (entry + stop loss + take profit)"""
+    success: bool
+    order_id: Optional[str] = None
+    stop_order_id: Optional[str] = None
+    take_profit_order_id: Optional[str] = None
+    symbol: Optional[str] = None
+    side: Optional[str] = None
+    qty: Optional[int] = None
+    filled_price: Optional[float] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+
+
 class OrderExecutor:
     """Execute and manage orders via Alpaca"""
 
@@ -374,6 +389,117 @@ class OrderExecutor:
             logger.error(f"Error executing entry order: {e}")
             return OrderResult(success=False, error=str(e))
 
+    def execute_bracket_entry(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        stop_price: float,
+        take_profit_price: float,
+        use_limit: bool = False,
+        limit_price: float = None
+    ) -> BracketOrderResult:
+        """
+        Execute an entry order with bracket (stop loss + take profit) as a single atomic order.
+        This avoids Alpaca's wash trade detection by combining all orders into one request.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            stop_price: Stop loss trigger price
+            take_profit_price: Take profit limit price
+            use_limit: Whether to use limit order for entry
+            limit_price: Limit price if using limit order
+
+        Returns:
+            BracketOrderResult with order details including stop_order_id
+        """
+        try:
+            order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+
+            if use_limit and limit_price:
+                order_request = LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=round(limit_price, 2),
+                    order_class="bracket",
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2))
+                )
+                logger.info(
+                    f"Bracket order submitted: {side} {qty} {symbol} "
+                    f"@ limit ${limit_price:.2f}, SL=${stop_price:.2f}, TP=${take_profit_price:.2f}"
+                )
+            else:
+                order_request = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    order_class="bracket",
+                    stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+                    take_profit=TakeProfitRequest(limit_price=round(take_profit_price, 2))
+                )
+                logger.info(
+                    f"Bracket order submitted: {side} {qty} {symbol} "
+                    f"@ market, SL=${stop_price:.2f}, TP=${take_profit_price:.2f}"
+                )
+
+            order = self.client.submit_order(order_request)
+            self.active_orders[symbol] = order.id
+
+            # Extract leg order IDs from the bracket order response
+            stop_order_id = None
+            take_profit_order_id = None
+
+            if hasattr(order, 'legs') and order.legs:
+                for leg in order.legs:
+                    if leg.order_type == OrderType.STOP:
+                        stop_order_id = leg.id
+                    elif leg.order_type == OrderType.LIMIT:
+                        take_profit_order_id = leg.id
+
+            # Wait for entry fill (max 10 seconds for market orders)
+            filled_price = None
+            if not use_limit:
+                for _ in range(10):
+                    order_status = self.client.get_order_by_id(order.id)
+                    if order_status.status == OrderStatus.FILLED:
+                        filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
+                        break
+                    elif order_status.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
+                        return BracketOrderResult(
+                            success=False,
+                            order_id=order.id,
+                            symbol=symbol,
+                            error=f"Order {order_status.status.value}"
+                        )
+                    time_module.sleep(1)
+
+            logger.info(
+                f"Bracket entry executed: {symbol} filled @ ${filled_price:.2f if filled_price else 'pending'}, "
+                f"stop_order_id={stop_order_id}, tp_order_id={take_profit_order_id}"
+            )
+
+            return BracketOrderResult(
+                success=True,
+                order_id=order.id,
+                stop_order_id=stop_order_id,
+                take_profit_order_id=take_profit_order_id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                filled_price=filled_price,
+                status=order.status.value
+            )
+
+        except Exception as e:
+            logger.error(f"Error executing bracket entry: {e}")
+            return BracketOrderResult(success=False, error=str(e))
+
     def create_stop_loss_order(
         self,
         symbol: str,
@@ -473,7 +599,7 @@ class OrderExecutor:
         position_side: str
     ) -> OrderResult:
         """
-        Close a partial position
+        Close a partial position and wait for fill to get actual fill price.
 
         Args:
             symbol: Stock symbol
@@ -481,12 +607,58 @@ class OrderExecutor:
             position_side: 'long' or 'short'
 
         Returns:
-            OrderResult with execution details
+            OrderResult with execution details including filled_price
         """
         try:
             # To close, we do the opposite: sell for longs, buy for shorts
             close_side = 'sell' if position_side.lower() == 'long' else 'buy'
-            return self.execute_market_order(symbol, qty, close_side)
+            order_side = OrderSide.SELL if close_side == 'sell' else OrderSide.BUY
+
+            order_request = MarketOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=order_side,
+                time_in_force=TimeInForce.DAY
+            )
+
+            order = self.client.submit_order(order_request)
+
+            # Wait for fill (max 10 seconds) to get actual fill price
+            for _ in range(10):
+                order_status = self.client.get_order_by_id(order.id)
+                if order_status.status == OrderStatus.FILLED:
+                    filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
+                    logger.info(
+                        f"Partial close filled: {symbol} {close_side} {qty} @ ${filled_price:.2f if filled_price else 'N/A'}"
+                    )
+                    return OrderResult(
+                        success=True,
+                        order_id=order.id,
+                        symbol=symbol,
+                        side=close_side,
+                        qty=qty,
+                        filled_price=filled_price,
+                        status='filled'
+                    )
+                elif order_status.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
+                    return OrderResult(
+                        success=False,
+                        order_id=order.id,
+                        symbol=symbol,
+                        error=f"Order {order_status.status.value}"
+                    )
+                time_module.sleep(1)
+
+            # If not filled in 10s, return without fill price
+            logger.warning(f"Partial close order not filled in 10s: {symbol}")
+            return OrderResult(
+                success=True,
+                order_id=order.id,
+                symbol=symbol,
+                side=close_side,
+                qty=qty,
+                status=order.status.value
+            )
 
         except Exception as e:
             logger.error(f"Error closing partial position: {e}")

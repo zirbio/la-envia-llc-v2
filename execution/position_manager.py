@@ -236,7 +236,7 @@ class PositionManager:
 
         Args:
             position: Position to partially close
-            current_price: Current market price
+            current_price: Current market price (used as fallback only)
 
         Returns:
             List of events
@@ -252,7 +252,7 @@ class PositionManager:
             f"closing {close_qty} of {position.current_qty} shares"
         )
 
-        # 1. Close partial position
+        # 1. Close partial position and get actual fill price
         close_result = order_executor.close_partial_position(
             symbol=position.symbol,
             qty=close_qty,
@@ -266,11 +266,19 @@ class PositionManager:
         position.partial_close_order_id = close_result.order_id
         position.partial_close_time = datetime.now()
 
-        # Calculate realized P/L for partial close
-        if position.side == 'long':
-            partial_pnl = (current_price - position.entry_price) * close_qty
+        # Use actual fill price from the order, fallback to quote mid if unavailable
+        actual_fill_price = close_result.filled_price or current_price
+
+        if close_result.filled_price:
+            logger.info(f"Partial close filled at actual price: ${actual_fill_price:.2f}")
         else:
-            partial_pnl = (position.entry_price - current_price) * close_qty
+            logger.warning(f"Using quote price as fallback for P/L calculation: ${current_price:.2f}")
+
+        # Calculate realized P/L using ACTUAL fill price
+        if position.side == 'long':
+            partial_pnl = (actual_fill_price - position.entry_price) * close_qty
+        else:
+            partial_pnl = (position.entry_price - actual_fill_price) * close_qty
 
         position.realized_pnl += partial_pnl
 
@@ -307,9 +315,12 @@ class PositionManager:
         position.state = PositionState.PARTIAL_CLOSED
         position.current_qty -= close_qty
 
+        # Calculate R-multiple using actual fill price
+        r_multiple = (actual_fill_price - position.entry_price) / position.risk_per_share if position.side == 'long' else (position.entry_price - actual_fill_price) / position.risk_per_share
+
         logger.info(
             f"Partial close complete for {position.symbol}: "
-            f"closed {close_qty} @ ${current_price:.2f}, "
+            f"closed {close_qty} @ ${actual_fill_price:.2f} (actual fill), "
             f"remaining {position.current_qty}, "
             f"stop moved to breakeven ${new_stop_price:.2f}, "
             f"realized P/L: ${partial_pnl:.2f}"
@@ -320,11 +331,11 @@ class PositionManager:
             symbol=position.symbol,
             details={
                 'closed_qty': close_qty,
-                'close_price': current_price,
+                'close_price': actual_fill_price,  # Use actual fill price, not quote
                 'remaining_qty': position.current_qty,
                 'new_stop': new_stop_price,
                 'realized_pnl': partial_pnl,
-                'r_multiple': position.calculate_r_multiple(current_price)
+                'r_multiple': r_multiple  # Calculate using actual fill price
             }
         ))
 

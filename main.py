@@ -529,46 +529,41 @@ class TradingBot:
             logger.error(f"Error handling position event: {e}")
 
     async def _on_trade_confirmed(self, signal: TradeSignal):
-        """Handle confirmed trade from Telegram with managed execution"""
+        """Handle confirmed trade from Telegram with managed execution using bracket orders"""
         logger.info(f"Trade confirmed: {signal.signal_type.value} {signal.symbol}")
 
         # Determine order side
         entry_side = 'buy' if signal.signal_type.value == 'LONG' else 'sell'
         position_side = 'long' if signal.signal_type.value == 'LONG' else 'short'
 
-        # Execute entry order (standalone, no bracket)
-        entry_result = order_executor.execute_entry_order(
+        # Execute bracket order (entry + stop loss + take profit in one atomic order)
+        # This avoids Alpaca's wash trade detection
+        bracket_result = order_executor.execute_bracket_entry(
             symbol=signal.symbol,
             qty=signal.position_size,
             side=entry_side,
+            stop_price=signal.stop_loss,
+            take_profit_price=signal.take_profit,
             use_limit=settings.trading.use_limit_entry,
             limit_price=signal.entry_price if settings.trading.use_limit_entry else None
         )
 
-        if not entry_result.success:
-            await telegram_bot.send_message(f"❌ Error ejecutando entrada: {entry_result.error}")
+        if not bracket_result.success:
+            await telegram_bot.send_message(f"❌ Error ejecutando orden: {bracket_result.error}")
             return
 
-        # Get fill price from order (may need to wait for fill)
-        fill_price = signal.entry_price  # Use signal price as estimate
+        # Get fill price from bracket order result
+        fill_price = bracket_result.filled_price or signal.entry_price
 
-        # Create standalone stop loss order
-        stop_result = order_executor.create_stop_loss_order(
-            symbol=signal.symbol,
-            qty=signal.position_size,
-            stop_price=signal.stop_loss,
-            position_side=position_side
-        )
+        # Get stop order ID from bracket order legs
+        stop_order_id = bracket_result.stop_order_id
 
-        if not stop_result.success:
-            logger.error(f"Failed to create stop loss: {stop_result.error}")
+        if not stop_order_id:
+            logger.warning("No stop order ID returned from bracket order - position may not be protected")
             await telegram_bot.send_message(
-                f"⚠️ Entrada ejecutada pero error en stop loss: {stop_result.error}\n"
-                f"Por favor crear stop manualmente @ ${signal.stop_loss:.2f}"
+                f"⚠️ Entrada ejecutada pero no se pudo obtener ID del stop loss.\n"
+                f"Verificar orden en Alpaca dashboard."
             )
-            stop_order_id = None
-        else:
-            stop_order_id = stop_result.order_id
 
         # Register position for management
         await position_manager.register_position(
