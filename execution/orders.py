@@ -488,8 +488,9 @@ class OrderExecutor:
                         )
                     await asyncio.sleep(1)  # Non-blocking async sleep
 
+            price_str = f"${filled_price:.2f}" if filled_price is not None else "pending"
             logger.info(
-                f"OTO entry executed: {symbol} filled @ ${filled_price:.2f if filled_price else 'pending'}, "
+                f"OTO entry executed: {symbol} filled @ {price_str}, "
                 f"stop_order_id={stop_order_id}"
             )
 
@@ -637,8 +638,9 @@ class OrderExecutor:
                 order_status = self.client.get_order_by_id(order.id)
                 if order_status.status == OrderStatus.FILLED:
                     filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
+                    price_str = f"${filled_price:.2f}" if filled_price is not None else "N/A"
                     logger.info(
-                        f"Partial close filled: {symbol} {close_side} {qty} @ ${filled_price:.2f if filled_price else 'N/A'}"
+                        f"Partial close filled: {symbol} {close_side} {qty} @ {price_str}"
                     )
                     return OrderResult(
                         success=True,
