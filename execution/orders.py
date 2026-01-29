@@ -390,6 +390,159 @@ class OrderExecutor:
             logger.error(f"Error executing entry order: {e}")
             return OrderResult(success=False, error=str(e))
 
+    async def execute_entry_order_and_wait(
+        self,
+        symbol: str,
+        qty: int,
+        side: str,
+        use_limit: bool = False,
+        limit_price: float = None,
+        timeout: int = 30
+    ) -> OrderResult:
+        """
+        Execute an entry order (no stop loss attached) and wait for fill.
+
+        This is the first step in a two-step order flow that allows calculating
+        stop loss based on actual fill price instead of signal price.
+
+        Args:
+            symbol: Stock symbol
+            qty: Number of shares
+            side: 'buy' or 'sell'
+            use_limit: Whether to use limit order
+            limit_price: Limit price if using limit order
+            timeout: Max seconds to wait for fill (default 30)
+
+        Returns:
+            OrderResult with filled_price if successful
+        """
+        try:
+            order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+
+            if use_limit and limit_price:
+                order_request = LimitOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=round(limit_price, 2)
+                )
+                logger.info(
+                    f"Entry order submitted: {side} {qty} {symbol} @ limit ${limit_price:.2f}"
+                )
+            else:
+                order_request = MarketOrderRequest(
+                    symbol=symbol,
+                    qty=qty,
+                    side=order_side,
+                    time_in_force=TimeInForce.DAY
+                )
+                logger.info(
+                    f"Entry order submitted: {side} {qty} {symbol} @ market"
+                )
+
+            order = self.client.submit_order(order_request)
+            self.active_orders[symbol] = order.id
+
+            # Wait for fill using async sleep
+            filled_price = None
+            for _ in range(timeout):
+                order_status = await asyncio.to_thread(self.client.get_order_by_id, order.id)
+
+                if order_status.status == OrderStatus.FILLED:
+                    filled_price = float(order_status.filled_avg_price) if order_status.filled_avg_price else None
+                    logger.info(f"Entry order filled: {symbol} @ ${filled_price:.2f}")
+                    break
+                elif order_status.status in (OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED):
+                    return OrderResult(
+                        success=False,
+                        order_id=order.id,
+                        symbol=symbol,
+                        error=f"Order {order_status.status.value}"
+                    )
+                await asyncio.sleep(1)
+
+            # If order didn't fill within timeout, cancel it and verify final state
+            if filled_price is None:
+                logger.warning(
+                    f"Entry order timeout: {symbol} order_id={order.id} not filled in {timeout}s, cancelling..."
+                )
+
+                final_status = None
+                try:
+                    await asyncio.to_thread(self.client.cancel_order_by_id, order.id)
+                    await asyncio.sleep(0.5)  # Wait for cancel to process
+                    final_status = await asyncio.to_thread(self.client.get_order_by_id, order.id)
+                    logger.info(f"Cancelled unfilled entry order for {symbol}, final_status={final_status.status.value}")
+                except Exception as cancel_err:
+                    logger.error(
+                        f"Error cancelling unfilled entry order {order.id} for {symbol}: {cancel_err}. "
+                        f"Order state may be indeterminate - checking final state..."
+                    )
+                    # Must check final state even if cancel failed
+                    try:
+                        final_status = await asyncio.to_thread(self.client.get_order_by_id, order.id)
+                    except Exception as status_err:
+                        logger.error(
+                            f"CRITICAL: Cannot determine order state for {order.id} ({symbol}): {status_err}. "
+                            f"Manual verification required."
+                        )
+                        return OrderResult(
+                            success=False,
+                            order_id=order.id,
+                            symbol=symbol,
+                            error=f"Order state unknown after timeout - manual check required for order {order.id}"
+                        )
+
+                # Check if order actually filled during cancel attempt (race condition)
+                if final_status and final_status.status == OrderStatus.FILLED:
+                    actual_fill = float(final_status.filled_avg_price) if final_status.filled_avg_price else None
+                    logger.warning(
+                        f"Order {order.id} for {symbol} filled during cancel attempt @ ${actual_fill:.2f} - proceeding as success"
+                    )
+                    return OrderResult(
+                        success=True,
+                        order_id=order.id,
+                        symbol=symbol,
+                        side=side,
+                        qty=qty,
+                        filled_price=actual_fill,
+                        status='filled'
+                    )
+                elif final_status and final_status.filled_qty and float(final_status.filled_qty) > 0:
+                    partial_qty = float(final_status.filled_qty)
+                    logger.error(
+                        f"CRITICAL: Partial fill detected for order {order.id} ({symbol}): "
+                        f"{partial_qty} of {qty} shares filled. Manual intervention required."
+                    )
+                    return OrderResult(
+                        success=False,
+                        order_id=order.id,
+                        symbol=symbol,
+                        error=f"Partial fill: {int(partial_qty)} of {qty} shares filled. Manual intervention required."
+                    )
+
+                return OrderResult(
+                    success=False,
+                    order_id=order.id,
+                    symbol=symbol,
+                    error=f"Entry order not filled within {timeout}s timeout - order cancelled"
+                )
+
+            return OrderResult(
+                success=True,
+                order_id=order.id,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                filled_price=filled_price,
+                status='filled'
+            )
+
+        except Exception as e:
+            logger.error(f"Error executing entry order and wait: {e}")
+            return OrderResult(success=False, error=str(e))
+
     async def execute_oto_entry(
         self,
         symbol: str,

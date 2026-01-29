@@ -53,6 +53,62 @@ logger.add(
 EST = pytz.timezone('US/Eastern')
 
 
+def _categorize_order_error(error: str) -> tuple[str, str]:
+    """
+    Categorize order errors into user-friendly messages.
+
+    Args:
+        error: Raw error string from order execution
+
+    Returns:
+        Tuple of (user_friendly_message, suggested_action)
+    """
+    error_lower = error.lower() if error else ""
+
+    if "insufficient" in error_lower or "buying power" in error_lower:
+        return (
+            "Capital insuficiente para esta operacion",
+            "Revisar balance de cuenta o reducir tamano de posicion"
+        )
+    elif "market closed" in error_lower or "market is closed" in error_lower:
+        return (
+            "Mercado cerrado",
+            "Esperar apertura del mercado"
+        )
+    elif "not found" in error_lower or "symbol" in error_lower:
+        return (
+            "Simbolo no encontrado o no disponible",
+            "Verificar que el simbolo es correcto y tradeable"
+        )
+    elif "timeout" in error_lower:
+        return (
+            "Tiempo de espera agotado",
+            "El mercado puede estar muy volatil. Reintentar mas tarde"
+        )
+    elif "rejected" in error_lower:
+        return (
+            "Orden rechazada por el broker",
+            "Verificar parametros de la orden y restricciones de cuenta"
+        )
+    elif "partial" in error_lower:
+        return (
+            "Orden parcialmente ejecutada",
+            "Verificar posicion actual en Alpaca dashboard"
+        )
+    elif "rate limit" in error_lower or "too many" in error_lower:
+        return (
+            "Limite de peticiones excedido",
+            "Esperar unos segundos antes de reintentar"
+        )
+    else:
+        # Truncate long errors for user display
+        truncated = error[:100] + "..." if len(error) > 100 else error
+        return (
+            f"Error tecnico: {truncated}",
+            "Contactar soporte si persiste"
+        )
+
+
 class TradingBot:
     """Main trading bot orchestrator"""
 
@@ -437,6 +493,15 @@ class TradingBot:
             if not quote:
                 return None
 
+            # Validate quote freshness - reject stale quotes to prevent bad signals
+            MAX_QUOTE_AGE_SECONDS = 60
+            quote_age = quote.get('age_seconds', 0)
+            if quote_age > MAX_QUOTE_AGE_SECONDS:
+                logger.warning(
+                    f"{symbol}: Quote too stale ({quote_age:.0f}s > {MAX_QUOTE_AGE_SECONDS}s), skipping"
+                )
+                return None
+
             current_price = quote['mid']
 
             # Get average volume for relative volume calculation
@@ -601,16 +666,16 @@ class TradingBot:
             logger.error(f"Error handling position event: {e}")
 
     async def _on_trade_confirmed(self, signal: TradeSignal):
-        """Handle confirmed trade from Telegram with managed execution using OTO orders"""
+        """Handle confirmed trade with correct stop loss based on actual fill price.
+
+        Uses two-step order flow to calculate stop loss from fill price instead of signal price.
+        This avoids the bug where OTO stop orders are placed at incorrect prices due to slippage.
+        """
         logger.info(f"Trade confirmed: {signal.signal_type.value} {signal.symbol}")
 
         # Determine order side
         entry_side = 'buy' if signal.signal_type.value == 'LONG' else 'sell'
         position_side = 'long' if signal.signal_type.value == 'LONG' else 'short'
-
-        # Execute OTO order (entry + stop loss only - no take profit)
-        # This avoids Alpaca's wash trade detection and allows stop modification
-        # Take profit is managed via partial close strategy at 1R
 
         # Calculate limit price with buffer based on direction
         limit_price = None
@@ -618,56 +683,157 @@ class TradingBot:
             buffer_pct = settings.trading.limit_entry_buffer_pct
             if signal.signal_type.value == 'LONG':
                 # For LONG (buy limit), set limit ABOVE entry to ensure fill
-                # Buy limits execute at limit price or LOWER
                 limit_price = signal.entry_price * (1 + buffer_pct)
             else:
                 # For SHORT (sell limit), set limit BELOW entry to ensure fill
-                # Sell limits execute at limit price or HIGHER
                 limit_price = signal.entry_price * (1 - buffer_pct)
 
-        oto_result = await order_executor.execute_oto_entry(
+        # STEP 1: Execute ONLY the entry order (no stop loss attached)
+        entry_result = await order_executor.execute_entry_order_and_wait(
             symbol=signal.symbol,
             qty=signal.position_size,
             side=entry_side,
-            stop_price=signal.stop_loss,
             use_limit=settings.trading.use_limit_entry,
-            limit_price=limit_price
+            limit_price=limit_price,
+            timeout=settings.trading.limit_order_fill_timeout
         )
 
-        if not oto_result.success:
-            await telegram_bot.send_message(f"❌ Error ejecutando orden: {oto_result.error}")
+        if not entry_result.success:
+            # Use categorized error message for better UX
+            user_msg, action = _categorize_order_error(entry_result.error or "Unknown error")
+            logger.error(
+                f"Entry order failed for {signal.symbol}: {entry_result.error}",
+                extra={"symbol": signal.symbol, "error": entry_result.error}
+            )
+            await telegram_bot.send_message(
+                f"❌ Error ejecutando orden para {signal.symbol}\n"
+                f"Razon: {user_msg}\n"
+                f"Accion: {action}"
+            )
             return
 
-        # Validate that entry actually filled - no fallback allowed
-        if not oto_result.filled_price:
+        if not entry_result.filled_price:
             await telegram_bot.send_message(
                 f"⚠️ Orden no ejecutada: {signal.symbol}\n"
-                f"El precio límite no fue alcanzado. Orden cancelada."
+                f"El precio limite no fue alcanzado. Orden cancelada."
             )
             return
 
-        fill_price = oto_result.filled_price  # Must be actual fill, no fallback
+        fill_price = entry_result.filled_price
 
-        # Get stop order ID from OTO order legs (validated in execute_oto_entry)
-        stop_order_id = oto_result.stop_order_id
+        # STEP 2: Calculate stop loss based on ACTUAL FILL PRICE
+        # Preserve the original risk per share from the signal
+        original_risk_per_share = abs(signal.entry_price - signal.stop_loss)
 
-        # OTO entry validates stop_order_id, but double-check for safety
-        if not stop_order_id:
-            logger.warning("No stop order ID returned from OTO order - position may not be protected")
+        # Validate risk per share is reasonable (not zero or negative)
+        MIN_RISK_PER_SHARE = 0.01
+        if original_risk_per_share < MIN_RISK_PER_SHARE:
+            logger.error(
+                f"CRITICAL: Invalid risk per share ${original_risk_per_share:.4f} for {signal.symbol}. "
+                f"signal.entry_price=${signal.entry_price:.2f}, signal.stop_loss=${signal.stop_loss:.2f}. "
+                f"Closing position to prevent invalid stop loss."
+            )
+            # Close position immediately to avoid unprotected trade
+            close_result = order_executor.close_position(signal.symbol)
             await telegram_bot.send_message(
-                f"⚠️ Entrada ejecutada pero no se pudo obtener ID del stop loss.\n"
-                f"Verificar orden en Alpaca dashboard."
+                f"🚨 EMERGENCIA: Riesgo por accion invalido (${original_risk_per_share:.4f})\n"
+                f"Posicion {signal.symbol} CERRADA automaticamente.\n"
+                f"Resultado: {'Cerrada' if close_result.success else 'Error al cerrar - verificar manualmente'}"
+            )
+            return
+
+        if signal.signal_type.value == 'LONG':
+            # For LONG: stop loss is BELOW entry price
+            actual_stop_loss = fill_price - original_risk_per_share
+            # Floor: stop loss cannot be negative or zero
+            actual_stop_loss = max(0.01, actual_stop_loss)
+        else:
+            # For SHORT: stop loss is ABOVE entry price
+            actual_stop_loss = fill_price + original_risk_per_share
+
+        actual_stop_loss = round(actual_stop_loss, 2)
+
+        # STEP 3: Create stop loss as separate order WITH RETRY LOGIC
+        MAX_STOP_RETRIES = 3
+        stop_result = None
+        stop_order_id = None
+
+        for attempt in range(MAX_STOP_RETRIES):
+            # Use asyncio.to_thread to avoid blocking the event loop
+            stop_result = await asyncio.to_thread(
+                order_executor.create_stop_loss_order,
+                signal.symbol,
+                signal.position_size,
+                actual_stop_loss,
+                position_side
             )
 
-        # Register position for management with actual stop price for 1R consistency
-        actual_stop_price = round(signal.stop_loss, 2)
-        await position_manager.register_position(
-            signal=signal,
-            fill_price=fill_price,
-            qty=signal.position_size,
-            stop_order_id=stop_order_id,
-            actual_stop_price=actual_stop_price
+            if stop_result.success:
+                stop_order_id = stop_result.order_id
+                logger.info(f"Stop loss created: {signal.symbol} @ ${actual_stop_loss:.2f}")
+                break
+
+            if attempt < MAX_STOP_RETRIES - 1:
+                wait_time = (2 ** attempt) * 0.5  # 0.5s, 1s, 2s exponential backoff
+                logger.warning(
+                    f"Stop loss creation attempt {attempt + 1}/{MAX_STOP_RETRIES} failed for {signal.symbol}: "
+                    f"{stop_result.error}. Retrying in {wait_time}s..."
+                )
+                await asyncio.sleep(wait_time)
+
+        # Handle stop loss creation failure after all retries
+        if not stop_result or not stop_result.success:
+            logger.error(
+                f"CRITICAL: Stop loss creation failed for {signal.symbol} after {MAX_STOP_RETRIES} attempts. "
+                f"Position is UNPROTECTED. Error: {stop_result.error if stop_result else 'Unknown'}"
+            )
+            await telegram_bot.send_message(
+                f"🚨 CRÍTICO: Stop loss FALLIDO para {signal.symbol}\n"
+                f"Entrada: ${fill_price:.2f}\n"
+                f"Stop requerido: ${actual_stop_loss:.2f}\n"
+                f"Intentos: {MAX_STOP_RETRIES}\n"
+                f"⚠️ CREAR STOP MANUAL INMEDIATAMENTE"
+            )
+
+        # Log verification that stop is correctly placed
+        if signal.signal_type.value == 'LONG':
+            stop_correct = actual_stop_loss < fill_price
+        else:
+            stop_correct = actual_stop_loss > fill_price
+
+        logger.info(
+            f"Position opened: {signal.signal_type.value} {signal.symbol} "
+            f"Entry=${fill_price:.2f}, Stop=${actual_stop_loss:.2f}, "
+            f"Risk=${original_risk_per_share:.2f}/share, StopCorrect={stop_correct}, "
+            f"StopProtected={stop_order_id is not None}"
         )
+
+        if not stop_correct:
+            logger.error(
+                f"CRITICAL: Stop loss incorrectly placed! "
+                f"{signal.signal_type.value} entry=${fill_price:.2f} stop=${actual_stop_loss:.2f}"
+            )
+
+        # Register position for management with actual stop price
+        try:
+            await position_manager.register_position(
+                signal=signal,
+                fill_price=fill_price,
+                qty=signal.position_size,
+                stop_order_id=stop_order_id,
+                actual_stop_price=actual_stop_loss
+            )
+        except Exception as e:
+            logger.error(
+                f"CRITICAL: Failed to register position for {signal.symbol}: {e}. "
+                f"Position exists but is UNTRACKED."
+            )
+            await telegram_bot.send_message(
+                f"⚠️ Posicion {signal.symbol} ejecutada pero NO registrada internamente.\n"
+                f"Fill: ${fill_price:.2f}, Qty: {signal.position_size}\n"
+                f"Stop: ${actual_stop_loss:.2f}\n"
+                f"El bot NO monitoreara esta posicion automaticamente."
+            )
 
         # Send confirmation
         await telegram_bot.send_execution_confirmation(
@@ -677,9 +843,11 @@ class TradingBot:
             price=fill_price
         )
 
-        # Notify about position management
+        # Notify about position management with actual stop price
+        protection_status = "✅ Protegida" if stop_order_id else "⚠️ SIN PROTECCION"
         await telegram_bot.send_message(
             f"📊 *Gestion de posicion activada*\n"
+            f"- Stop Loss: ${actual_stop_loss:.2f} ({protection_status})\n"
             f"- Cierre parcial (50%) al alcanzar 1R\n"
             f"- Stop movido a breakeven tras cierre parcial\n"
             f"- Trailing con EMA9 (5min) para el resto"
@@ -689,10 +857,11 @@ class TradingBot:
             'symbol': signal.symbol,
             'side': signal.signal_type.value,
             'entry': fill_price,
-            'stop': signal.stop_loss,
+            'stop': actual_stop_loss,  # Use actual stop, not signal stop
             'target': signal.take_profit,
             'qty': signal.position_size,
-            'time': datetime.now(EST)
+            'time': datetime.now(EST),
+            'protected': stop_order_id is not None  # Track protection status
         })
 
     async def _end_session(self):

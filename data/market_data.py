@@ -4,7 +4,9 @@ Market data retrieval from Alpaca API
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
 import pandas as pd
+import pytz
 from alpaca.data import StockHistoricalDataClient, StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
@@ -13,6 +15,9 @@ from alpaca.trading.enums import AssetClass, AssetStatus
 from loguru import logger
 
 from config.settings import settings
+
+# US Eastern timezone for market hours calculations
+EST = pytz.timezone('US/Eastern')
 
 # Rate limiting constants for API calls
 BATCH_DELAY_SECONDS = 0.3  # 300ms delay between batches to respect API limits
@@ -57,7 +62,7 @@ class MarketDataClient:
         """
         try:
             if start is None:
-                start = datetime.now() - timedelta(days=5)
+                start = datetime.now(EST) - timedelta(days=5)
 
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
@@ -180,7 +185,7 @@ class MarketDataClient:
         Returns:
             DataFrame with daily OHLCV
         """
-        start = datetime.now() - timedelta(days=days + 5)
+        start = datetime.now(EST) - timedelta(days=days + 5)
         return self.get_bars(
             symbol=symbol,
             timeframe=TimeFrame.Day,
@@ -215,7 +220,7 @@ class MarketDataClient:
             gap_percent = ((current_price - prev_close) / prev_close) * 100
 
             # Get today's pre-market bars for volume and High/Low
-            today = datetime.now().replace(hour=4, minute=0, second=0, microsecond=0)
+            today = datetime.now(EST).replace(hour=4, minute=0, second=0, microsecond=0)
             premarket_bars = self.get_bars(
                 symbol=symbol,
                 timeframe=TimeFrame.Minute,
@@ -276,7 +281,7 @@ class MarketDataClient:
             Today's open price or None
         """
         try:
-            today = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
+            today = datetime.now(EST).replace(hour=9, minute=30, second=0, microsecond=0)
             bars = self.get_bars(
                 symbol=symbol,
                 timeframe=TimeFrame.Minute,
@@ -321,7 +326,7 @@ class MarketDataClient:
         """
         try:
             # Get minute bars for the last lookback_days
-            start = datetime.now() - timedelta(days=lookback_days + 7)  # Extra buffer for weekends
+            start = datetime.now(EST) - timedelta(days=lookback_days + 7)  # Extra buffer for weekends
 
             bars = self.get_bars(
                 symbol=symbol,
@@ -436,7 +441,7 @@ class MarketDataClient:
         """
         try:
             # Get today's bars from market open
-            today = datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
+            today = datetime.now(EST).replace(hour=9, minute=30, second=0, microsecond=0)
 
             bars = self.get_bars(
                 symbol=symbol,
@@ -461,7 +466,7 @@ class MarketDataClient:
         Returns:
             Minute index (0 = 9:30, 16 = 9:46, etc.)
         """
-        now = datetime.now()
+        now = datetime.now(EST)
         market_open_minutes = 9 * 60 + 30
         current_minutes = now.hour * 60 + now.minute
         return max(0, current_minutes - market_open_minutes)
@@ -566,7 +571,7 @@ class MarketDataClient:
             return {}
 
         try:
-            start = datetime.now() - timedelta(days=5)
+            start = datetime.now(EST) - timedelta(days=5)
 
             request = StockBarsRequest(
                 symbol_or_symbols=symbols,
@@ -683,7 +688,7 @@ class MarketDataClient:
 
         filtered = []
         total_batches = (len(symbols) + batch_size - 1) // batch_size
-        start_time = datetime.now()
+        start_time = datetime.now(EST)
 
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
@@ -703,7 +708,7 @@ class MarketDataClient:
 
                 # Progress logging every 5 batches or at end
                 if batch_num % 5 == 0 or batch_num == total_batches:
-                    elapsed = (datetime.now() - start_time).total_seconds()
+                    elapsed = (datetime.now(EST) - start_time).total_seconds()
                     logger.debug(
                         f"Tier 2 - Price filter batch {batch_num}/{total_batches}: "
                         f"{len(filtered)} symbols in range ({elapsed:.1f}s elapsed)"
@@ -748,7 +753,7 @@ class MarketDataClient:
 
         filtered = []
         total_batches = (len(symbols) + batch_size - 1) // batch_size
-        start_time = datetime.now()
+        start_time = datetime.now(EST)
 
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
@@ -761,7 +766,7 @@ class MarketDataClient:
 
             try:
                 # Get daily bars for batch
-                start = datetime.now() - timedelta(days=lookback_days + 7)
+                start = datetime.now(EST) - timedelta(days=lookback_days + 7)
 
                 request = StockBarsRequest(
                     symbol_or_symbols=batch,
@@ -782,7 +787,7 @@ class MarketDataClient:
 
                 # Progress logging every 10 batches or at end
                 if batch_num % 10 == 0 or batch_num == total_batches:
-                    elapsed = (datetime.now() - start_time).total_seconds()
+                    elapsed = (datetime.now(EST) - start_time).total_seconds()
                     pct_complete = (batch_num / total_batches) * 100
                     logger.info(
                         f"Tier 3 - Volume filter: {batch_num}/{total_batches} batches "
