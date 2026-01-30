@@ -1,5 +1,34 @@
 """
 Market data retrieval from Alpaca API
+
+This module uses REST API polling for market data. For lower latency in production,
+consider migrating to WebSocket streaming:
+
+WebSocket Streaming (Future Enhancement):
+- URL: wss://stream.data.alpaca.markets/v2/{feed}
+- Feeds: iex (free), sip (paid, real-time)
+- Subscription types: trades, quotes, bars
+- Benefits: ~10-100ms latency vs 2-10s polling
+- Limit: 1 connection per subscription type
+
+Example WebSocket setup (for future implementation):
+```python
+from alpaca.data.live import StockDataStream
+
+stream = StockDataStream(api_key, secret_key)
+
+@stream.on_bar(symbols=['AAPL'])
+async def on_bar(bar):
+    # Handle real-time bar data
+    pass
+
+stream.run()
+```
+
+Current implementation uses REST polling which is suitable for:
+- Paper trading with lower frequency requirements
+- Development and testing
+- Strategies with 2-10 second decision windows
 """
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,22 +38,47 @@ import pandas as pd
 import pytz
 from alpaca.data import StockHistoricalDataClient, StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.historical.screener import ScreenerClient
+from alpaca.data.requests import MostActivesRequest, MarketMoversRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest
 from alpaca.trading.enums import AssetClass, AssetStatus
 from loguru import logger
 
 from config.settings import settings
+from utils.rate_limit import exponential_backoff_with_jitter
 
 # US Eastern timezone for market hours calculations
 EST = pytz.timezone('US/Eastern')
 
 # Rate limiting constants for API calls
+# Alpaca limits: ~200 req/min for data API, ~200 req/min for trading API
 BATCH_DELAY_SECONDS = 0.3  # 300ms delay between batches to respect API limits
+MAX_RETRIES = 3  # Maximum retry attempts for failed requests
 
 
 class MarketDataClient:
-    """Client for retrieving market data from Alpaca"""
+    """
+    Client for retrieving market data from Alpaca.
+
+    IMPORTANT: This client uses SYNCHRONOUS methods (Alpaca SDK is sync).
+    When calling from async contexts, use asyncio.to_thread():
+        result = await asyncio.to_thread(market_data.get_bars, symbol)
+
+    Features:
+    - REST API polling for bars, quotes, and asset data
+    - Batch requests for efficient multi-symbol queries
+    - Automatic retry with exponential backoff for transient failures
+    - Static rate limiting via BATCH_DELAY_SECONDS between requests
+
+    Rate Limits (Alpaca):
+    - Data API: ~200 requests/minute (free tier)
+    - SDK doesn't expose rate limit headers, so we use static delays
+
+    For production use with lower latency requirements, consider:
+    - WebSocket streaming (see module docstring)
+    - Alpaca paid tiers for higher rate limits
+    """
 
     def __init__(self):
         self.data_client = StockHistoricalDataClient(
@@ -36,8 +90,85 @@ class MarketDataClient:
             secret_key=settings.alpaca.secret_key,
             paper=settings.alpaca.paper
         )
+        # Screener client for most actives and market movers
+        self.screener_client = ScreenerClient(
+            api_key=settings.alpaca.api_key,
+            secret_key=settings.alpaca.secret_key
+        )
         # Phase 2: Cache for intraday volume profiles by symbol
         self.volume_profiles: dict[str, dict[int, float]] = {}
+        # Note: Alpaca SDK doesn't expose rate limit headers, so we rely on
+        # static BATCH_DELAY_SECONDS and retry backoff for rate limit handling
+
+    def _retry_with_backoff(
+        self,
+        func,
+        *args,
+        max_retries: int = MAX_RETRIES,
+        **kwargs
+    ):
+        """
+        Execute a function with retry and exponential backoff.
+
+        Uses jitter to prevent thundering herd when multiple requests retry.
+
+        IMPORTANT: This is a SYNCHRONOUS method that uses time.sleep().
+        The Alpaca SDK is synchronous, so this method blocks during retries.
+        When calling from async contexts, wrap with asyncio.to_thread():
+            result = await asyncio.to_thread(self._retry_with_backoff, func, *args)
+
+        Args:
+            func: Function to execute (must be synchronous)
+            *args: Positional arguments for func
+            max_retries: Maximum retry attempts
+            **kwargs: Keyword arguments for func
+
+        Returns:
+            Result of func
+
+        Raises:
+            Last exception if all retries exhausted
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+
+            except Exception as e:
+                # Don't retry on final attempt
+                if attempt >= max_retries:
+                    logger.error(
+                        f"API call failed after {max_retries + 1} attempts: {e}"
+                    )
+                    raise
+
+                # Check if error is retryable
+                error_str = str(e).lower()
+                retryable = any(pattern in error_str for pattern in [
+                    'timeout', 'connection', 'rate', 'throttl',
+                    'temporary', 'unavailable', '429', '500', '502', '503', '504'
+                ])
+
+                if not retryable:
+                    logger.error(f"Non-retryable error: {e}")
+                    raise
+
+                # Calculate backoff with jitter
+                delay = exponential_backoff_with_jitter(
+                    attempt,
+                    base_delay=1.0,
+                    max_delay=30.0,
+                    jitter_factor=0.5
+                )
+
+                logger.warning(
+                    f"API call failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Retrying in {delay:.1f}s..."
+                )
+
+                time.sleep(delay)
+
+        # Should never reach here - loop either returns or raises
+        raise RuntimeError("Unexpected state in _retry_with_backoff")
 
     def get_bars(
         self,
@@ -495,6 +626,8 @@ class MarketDataClient:
         More efficient than calling get_latest_quote() for each symbol
         when checking multiple symbols in the watchlist.
 
+        Uses retry with exponential backoff for transient failures.
+
         Args:
             symbols: List of stock symbols
 
@@ -504,9 +637,13 @@ class MarketDataClient:
         if not symbols:
             return {}
 
-        try:
+        def _fetch_quotes():
             request = StockLatestQuoteRequest(symbol_or_symbols=symbols)
-            quotes = self.data_client.get_stock_latest_quote(request)
+            return self.data_client.get_stock_latest_quote(request)
+
+        try:
+            # Use retry with backoff for the API call
+            quotes = self._retry_with_backoff(_fetch_quotes)
 
             now = datetime.now(timezone.utc)
             result = {}
@@ -544,7 +681,7 @@ class MarketDataClient:
             return result
 
         except Exception as e:
-            logger.error(f"Error getting batch quotes: {e}")
+            logger.error(f"Error getting batch quotes (after retries): {e}")
             return {}
 
     def get_bars_batch(
@@ -559,6 +696,8 @@ class MarketDataClient:
         More efficient than calling get_bars() for each symbol
         when building indicators for multiple symbols.
 
+        Uses retry with exponential backoff for transient failures.
+
         Args:
             symbols: List of stock symbols
             timeframe: Bar timeframe
@@ -570,17 +709,19 @@ class MarketDataClient:
         if not symbols:
             return {}
 
-        try:
+        def _fetch_bars():
             start = datetime.now(EST) - timedelta(days=5)
-
             request = StockBarsRequest(
                 symbol_or_symbols=symbols,
                 timeframe=timeframe,
                 start=start,
                 limit=limit
             )
+            return self.data_client.get_stock_bars(request)
 
-            bars = self.data_client.get_stock_bars(request)
+        try:
+            # Use retry with backoff for the API call
+            bars = self._retry_with_backoff(_fetch_bars)
 
             result = {}
             for symbol in symbols:
@@ -602,7 +743,7 @@ class MarketDataClient:
             return result
 
         except Exception as e:
-            logger.error(f"Error getting batch bars: {e}")
+            logger.error(f"Error getting batch bars (after retries): {e}")
             return {}
 
     # ========== Dynamic Universe Methods ==========
@@ -739,6 +880,8 @@ class MarketDataClient:
         - Response payload is ~20x larger than quotes
         - Alpaca recommends smaller batches for historical data
 
+        Uses retry with exponential backoff and adaptive delays based on failures.
+
         Args:
             symbols: List of symbols to filter
             min_avg_volume: Minimum average daily volume (e.g., 1,000,000)
@@ -754,28 +897,34 @@ class MarketDataClient:
         filtered = []
         total_batches = (len(symbols) + batch_size - 1) // batch_size
         start_time = datetime.now(EST)
+        consecutive_batch_failures = 0
 
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i + batch_size]
             batch_num = i // batch_size + 1
 
-            # Rate limiting: add delay between batches to respect API limits
-            # Longer delay for bars (heavier requests)
+            # Adaptive rate limiting: increase delay after failures
             if batch_num > 1:
-                time.sleep(BATCH_DELAY_SECONDS * 2)  # 600ms for heavier requests
+                base_delay = BATCH_DELAY_SECONDS * 2  # 600ms for heavier requests
+                # Add extra delay if we've had recent failures
+                adaptive_delay = base_delay * (1 + consecutive_batch_failures * 0.5)
+                adaptive_delay = min(adaptive_delay, 5.0)  # Cap at 5 seconds
+                time.sleep(adaptive_delay)
 
-            try:
-                # Get daily bars for batch
-                start = datetime.now(EST) - timedelta(days=lookback_days + 7)
-
+            def _fetch_volume_bars():
+                bar_start = datetime.now(EST) - timedelta(days=lookback_days + 7)
                 request = StockBarsRequest(
                     symbol_or_symbols=batch,
                     timeframe=TimeFrame.Day,
-                    start=start,
+                    start=bar_start,
                     limit=lookback_days
                 )
+                return self.data_client.get_stock_bars(request)
 
-                bars = self.data_client.get_stock_bars(request)
+            try:
+                # Use retry with backoff for the API call
+                bars = self._retry_with_backoff(_fetch_volume_bars)
+                consecutive_batch_failures = 0  # Reset on success
 
                 for symbol in batch:
                     if symbol in bars.data and bars.data[symbol]:
@@ -795,7 +944,16 @@ class MarketDataClient:
                     )
 
             except Exception as e:
-                logger.warning(f"Error in volume filter batch {batch_num}: {e}")
+                consecutive_batch_failures += 1
+                logger.warning(
+                    f"Error in volume filter batch {batch_num} (failures: {consecutive_batch_failures}): {e}"
+                )
+                # If too many consecutive failures, log a more severe warning
+                if consecutive_batch_failures >= 3:
+                    logger.error(
+                        f"Multiple consecutive batch failures ({consecutive_batch_failures}). "
+                        f"Consider checking API connectivity or rate limits."
+                    )
                 continue
 
         logger.info(
@@ -803,6 +961,172 @@ class MarketDataClient:
             f"with avg volume >= {min_avg_volume:,}"
         )
         return filtered
+
+    # ========== Screener Methods ==========
+
+    def get_most_active_stocks(self, top: int = 20) -> list[dict]:
+        """
+        Get most active stocks by volume using Alpaca's Screener API.
+
+        This is an alternative/supplement to the dynamic universe building.
+        Returns real-time most active stocks based on SIP data.
+
+        Args:
+            top: Number of top symbols to return (default 20)
+
+        Returns:
+            List of dicts with symbol and volume data, sorted by activity
+        """
+        try:
+            request = MostActivesRequest(top=top)
+            response = self._retry_with_backoff(
+                self.screener_client.get_most_actives,
+                request_params=request
+            )
+
+            # Parse response - structure varies by SDK version
+            result = []
+            if hasattr(response, 'most_actives'):
+                for item in response.most_actives:
+                    result.append({
+                        'symbol': item.symbol,
+                        'volume': getattr(item, 'volume', 0),
+                        'trade_count': getattr(item, 'trade_count', 0),
+                    })
+            elif isinstance(response, dict):
+                for item in response.get('most_actives', []):
+                    result.append({
+                        'symbol': item.get('symbol'),
+                        'volume': item.get('volume', 0),
+                        'trade_count': item.get('trade_count', 0),
+                    })
+
+            logger.info(f"Screener: Found {len(result)} most active stocks")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Error getting most active stocks from screener: {e}")
+            return []
+
+    def get_market_movers(self, top: int = 10) -> dict[str, list[dict]]:
+        """
+        Get top market movers (gainers and losers) using Alpaca's Screener API.
+
+        Returns stocks with the largest price changes based on SIP data.
+        Change is calculated from previous close to latest close.
+
+        Args:
+            top: Number of top symbols per category (default 10)
+
+        Returns:
+            Dict with 'gainers' and 'losers' lists, each containing
+            symbol, change_percent, and price data
+        """
+        try:
+            request = MarketMoversRequest(top=top)
+            response = self._retry_with_backoff(
+                self.screener_client.get_market_movers,
+                request_params=request
+            )
+
+            result = {'gainers': [], 'losers': []}
+
+            # Parse response - handle both object and dict formats
+            if hasattr(response, 'gainers'):
+                for item in response.gainers:
+                    result['gainers'].append({
+                        'symbol': item.symbol,
+                        'change_percent': getattr(item, 'percent_change', 0),
+                        'price': getattr(item, 'price', 0),
+                        'volume': getattr(item, 'volume', 0),
+                    })
+            elif isinstance(response, dict):
+                for item in response.get('gainers', []):
+                    result['gainers'].append({
+                        'symbol': item.get('symbol'),
+                        'change_percent': item.get('percent_change', 0),
+                        'price': item.get('price', 0),
+                        'volume': item.get('volume', 0),
+                    })
+
+            if hasattr(response, 'losers'):
+                for item in response.losers:
+                    result['losers'].append({
+                        'symbol': item.symbol,
+                        'change_percent': getattr(item, 'percent_change', 0),
+                        'price': getattr(item, 'price', 0),
+                        'volume': getattr(item, 'volume', 0),
+                    })
+            elif isinstance(response, dict):
+                for item in response.get('losers', []):
+                    result['losers'].append({
+                        'symbol': item.get('symbol'),
+                        'change_percent': item.get('percent_change', 0),
+                        'price': item.get('price', 0),
+                        'volume': item.get('volume', 0),
+                    })
+
+            logger.info(
+                f"Screener: Found {len(result['gainers'])} gainers and "
+                f"{len(result['losers'])} losers"
+            )
+            return result
+
+        except Exception as e:
+            logger.warning(f"Error getting market movers from screener: {e}")
+            return {'gainers': [], 'losers': []}
+
+    def get_screener_candidates(
+        self,
+        min_price: float = 10.0,
+        max_price: float = 500.0,
+        top_actives: int = 50,
+        top_movers: int = 20
+    ) -> list[str]:
+        """
+        Get candidate symbols from Alpaca Screener API.
+
+        Combines most active stocks and market movers to find potential
+        trading candidates. This can supplement the dynamic universe.
+
+        Args:
+            min_price: Minimum price filter
+            max_price: Maximum price filter
+            top_actives: Number of most active stocks to consider
+            top_movers: Number of top movers (gainers/losers) to consider
+
+        Returns:
+            List of unique symbols passing basic filters
+        """
+        candidates = set()
+
+        # Get most active stocks
+        actives = self.get_most_active_stocks(top=top_actives)
+        for item in actives:
+            candidates.add(item['symbol'])
+
+        # Get market movers
+        movers = self.get_market_movers(top=top_movers)
+        for item in movers.get('gainers', []):
+            candidates.add(item['symbol'])
+        for item in movers.get('losers', []):
+            candidates.add(item['symbol'])
+
+        # Filter by price using batch quotes
+        if candidates:
+            symbols = list(candidates)
+            filtered = self.prefilter_by_price_batch(
+                symbols=symbols,
+                min_price=min_price,
+                max_price=max_price,
+                batch_size=100  # Smaller batch for quick check
+            )
+            logger.info(
+                f"Screener candidates: {len(filtered)}/{len(candidates)} passed price filter"
+            )
+            return filtered
+
+        return []
 
 
 # Global client instance
