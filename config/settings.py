@@ -305,15 +305,32 @@ class UniverseConfig:
     """
     Dynamic universe configuration for scanning all tradeable stocks.
 
-    The universe is built using tiered filtering:
-    - Tier 1: Asset filter (active, tradable, shortable) ~7000 → ~5000
-    - Tier 2: Price filter ($10-$500 by default) ~5000 → ~3000
-    - Tier 3: Volume filter (>=1M avg daily) ~3000 → ~500-800
+    Two scanning modes available:
+    1. Screener API (default, more efficient):
+       - Uses Alpaca's pre-calculated most actives and market movers
+       - ~3 API calls vs ~40 for tiered filtering
+       - Better coverage of hot stocks with real-time activity
+
+    2. Tiered filtering (fallback):
+       - Tier 1: Asset filter (active, tradable, shortable) ~7000 → ~5000
+       - Tier 2: Price filter ($10-$500 by default) ~5000 → ~3000
+       - Tier 3: Volume filter (>=1M avg daily) ~3000 → ~500-800
 
     Batch sizes are tuned for Alpaca API performance:
     - Quote requests are lightweight: up to 1000 symbols per request
     - Bar requests are heavier (20 days OHLCV): max 200 symbols recommended
     """
+    # === Screener API Configuration (Primary Method) ===
+    # Use Screener API as primary source (more efficient: ~3 API calls vs ~40)
+    use_screener_api: bool = os.getenv("USE_SCREENER_API", "true").lower() == "true"
+
+    # Number of most active stocks to fetch from screener
+    screener_top_actives: int = int(os.getenv("SCREENER_TOP_ACTIVES", "100"))
+
+    # Number of top movers (gainers + losers) to fetch
+    screener_top_movers: int = int(os.getenv("SCREENER_TOP_MOVERS", "50"))
+
+    # === Tiered Filtering Configuration (Fallback Method) ===
     # Enable/disable dynamic universe (fallback to hardcoded list if disabled)
     enabled: bool = os.getenv("DYNAMIC_UNIVERSE_ENABLED", "true").lower() == "true"
 
@@ -338,7 +355,19 @@ class UniverseConfig:
 
     def __post_init__(self):
         """Validate configuration parameters are within acceptable ranges."""
-        # Batch size validation
+        # Screener API validation
+        if not 10 <= self.screener_top_actives <= 200:
+            raise ValueError(
+                f"screener_top_actives must be between 10 and 200, "
+                f"got {self.screener_top_actives}"
+            )
+        if not 10 <= self.screener_top_movers <= 100:
+            raise ValueError(
+                f"screener_top_movers must be between 10 and 100, "
+                f"got {self.screener_top_movers}"
+            )
+
+        # Batch size validation (for tiered filtering fallback)
         if not 50 <= self.price_filter_batch_size <= 1000:
             raise ValueError(
                 f"price_filter_batch_size must be between 50 and 1000, "
@@ -423,6 +452,7 @@ class TradingConfig:
     limit_entry_buffer_pct: float = 0.001  # 0.1%
     limit_order_fill_timeout: int = 30  # seconds to wait for limit order fill
     stop_atr_multiplier: float = 1.5
+    min_stop_distance_pct: float = 0.003  # 0.3% minimum distance from entry to stop
 
     # Risk management (Phase 6)
     max_daily_loss: float = 750.0    # 3% of $25k - circuit breaker

@@ -772,6 +772,26 @@ class ORBStrategy:
                 f"using ${stop_loss:.2f} (tighter)"
             )
 
+        # Ensure minimum stop distance (prevent paper-thin stops)
+        min_distance = entry_price * self.config.min_stop_distance_pct
+
+        if direction == 'LONG':
+            max_allowed_stop = entry_price - min_distance
+            if stop_loss > max_allowed_stop:
+                logger.warning(
+                    f"{symbol} LONG stop too close: ${stop_loss:.2f} -> ${max_allowed_stop:.2f} "
+                    f"(min {self.config.min_stop_distance_pct*100:.1f}% distance)"
+                )
+                stop_loss = max_allowed_stop
+        else:  # SHORT
+            min_allowed_stop = entry_price + min_distance
+            if stop_loss < min_allowed_stop:
+                logger.warning(
+                    f"{symbol} SHORT stop too close: ${stop_loss:.2f} -> ${min_allowed_stop:.2f} "
+                    f"(min {self.config.min_stop_distance_pct*100:.1f}% distance)"
+                )
+                stop_loss = min_allowed_stop
+
         return stop_loss
 
     def _create_long_signal(

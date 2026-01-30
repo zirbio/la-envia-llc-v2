@@ -39,7 +39,7 @@ import pytz
 from alpaca.data import StockHistoricalDataClient, StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.historical.screener import ScreenerClient
-from alpaca.data.requests import MostActivesRequest, MarketMoversRequest
+from alpaca.data.requests import MostActivesRequest, MarketMoversRequest, StockSnapshotRequest
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetAssetsRequest
 from alpaca.trading.enums import AssetClass, AssetStatus
@@ -1127,6 +1127,105 @@ class MarketDataClient:
             return filtered
 
         return []
+
+    def get_snapshots_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """
+        Get snapshots for multiple symbols in a single API call.
+
+        A snapshot includes:
+        - latest_quote: current bid/ask prices
+        - daily_bar: today's OHLCV
+        - previous_daily_bar: yesterday's close (for gap calculation)
+
+        This is more efficient than making separate calls for quotes and bars.
+
+        Args:
+            symbols: List of stock symbols (max ~200 per call recommended)
+
+        Returns:
+            Dict mapping symbol to snapshot data:
+            {
+                'symbol': str,
+                'price': float,        # Mid price from quote
+                'prev_close': float,   # Yesterday's close
+                'gap_pct': float,      # Gap percentage
+                'daily_volume': int,   # Today's volume
+                'bid': float,
+                'ask': float,
+                'spread_pct': float,   # Bid-ask spread as percentage
+            }
+        """
+        if not symbols:
+            return {}
+
+        def _fetch_snapshots():
+            request = StockSnapshotRequest(symbol_or_symbols=symbols)
+            return self.data_client.get_stock_snapshot(request)
+
+        try:
+            # Use retry with backoff for the API call
+            snapshots = self._retry_with_backoff(_fetch_snapshots)
+
+            result = {}
+            for symbol in symbols:
+                if symbol not in snapshots:
+                    continue
+
+                snap = snapshots[symbol]
+
+                # Need both previous close and current quote for gap calculation
+                if not snap.previous_daily_bar or not snap.latest_quote:
+                    logger.debug(f"{symbol}: Missing snapshot data (prev_bar or quote)")
+                    continue
+
+                prev_close = float(snap.previous_daily_bar.close)
+                bid = float(snap.latest_quote.bid_price) if snap.latest_quote.bid_price else 0.0
+                ask = float(snap.latest_quote.ask_price) if snap.latest_quote.ask_price else 0.0
+
+                # Calculate mid price
+                if bid > 0 and ask > 0:
+                    current_price = (bid + ask) / 2
+                elif bid > 0:
+                    current_price = bid
+                elif ask > 0:
+                    current_price = ask
+                else:
+                    logger.debug(f"{symbol}: No valid bid/ask prices")
+                    continue
+
+                # Calculate gap percentage
+                if prev_close > 0:
+                    gap_pct = ((current_price - prev_close) / prev_close) * 100
+                else:
+                    gap_pct = 0.0
+
+                # Calculate spread percentage
+                spread_pct = 0.0
+                if bid > 0 and ask > 0:
+                    spread_pct = ((ask - bid) / current_price) * 100
+
+                # Get today's volume
+                daily_volume = 0
+                if snap.daily_bar:
+                    daily_volume = int(snap.daily_bar.volume)
+
+                result[symbol] = {
+                    'symbol': symbol,
+                    'price': current_price,
+                    'prev_close': prev_close,
+                    'gap_pct': gap_pct,
+                    'daily_volume': daily_volume,
+                    'bid': bid,
+                    'ask': ask,
+                    'spread_pct': spread_pct,
+                }
+
+            logger.info(f"Snapshots: Got data for {len(result)}/{len(symbols)} symbols")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error getting snapshots batch: {e}")
+            return {}
 
 
 # Global client instance

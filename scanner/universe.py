@@ -1,11 +1,22 @@
 """
-Dynamic Universe Manager for scanning all tradeable stocks.
+Dynamic Universe Manager - FALLBACK mechanism for scanning tradeable stocks.
 
-Implements tiered filtering to efficiently reduce ~7000 symbols to ~500-800 candidates:
-- Tier 1: Asset filter (active, tradable, shortable)
-- Tier 2: Price filter ($10-$500)
-- Tier 3: Volume filter (>=1M avg daily volume)
-- Tier 4: Premarket scan (gap, PM volume) - handled by PremarketScanner
+NOTE: As of 2024, the primary scanning method is the Screener API
+(see PremarketScanner.scan_with_screener()). This module serves as a
+fallback when Screener API is unavailable or disabled.
+
+Primary Method (Screener API - preferred):
+- ~3 API calls total
+- Uses Alpaca's pre-calculated most actives and market movers
+- Covers hot stocks with real-time activity data
+
+Fallback Method (Tiered Filtering - this module):
+- ~40 API calls
+- Tier 1: Asset filter (active, tradable, shortable) ~7000 → ~5000
+- Tier 2: Price filter ($10-$500) ~5000 → ~3000
+- Tier 3: Volume filter (>=1M avg daily volume) ~3000 → ~500-800
+
+To force use of tiered filtering, set USE_SCREENER_API=false in .env
 """
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -81,14 +92,20 @@ FALLBACK_UNIVERSE = [
 
 class UniverseManager:
     """
-    Manages the dynamic universe of tradeable stocks.
+    FALLBACK: Manages the dynamic universe of tradeable stocks via tiered filtering.
 
-    Builds and caches a filtered universe using tiered filtering:
-    1. Get all tradeable assets from Alpaca
-    2. Filter by price range
-    3. Filter by average daily volume
+    NOTE: This is the fallback mechanism. The primary scanning method is
+    Screener API (PremarketScanner.scan_with_screener()).
+
+    This manager builds and caches a filtered universe using tiered filtering:
+    1. Get all tradeable assets from Alpaca (~5000 after asset filter)
+    2. Filter by price range (~3000 remaining)
+    3. Filter by average daily volume (~500-800 final)
 
     The resulting universe is cached and refreshed daily (configurable).
+    Use get_cached_universe() to retrieve the current universe for scanning.
+
+    To use this instead of Screener API, set USE_SCREENER_API=false
     """
 
     def __init__(self):
@@ -263,12 +280,31 @@ class UniverseManager:
 
     def format_stats_message(self) -> str:
         """Format universe stats for Telegram message"""
+        # Check if Screener API is primary
+        use_screener = self.config.use_screener_api
+
+        header = (
+            "*Universe Status*\n\n"
+            f"🔍 Primary: {'Screener API' if use_screener else 'Tiered Filter'}\n"
+        )
+
+        if use_screener:
+            return (
+                f"{header}"
+                f"✅ Using Screener API (most actives + movers)\n"
+                f"├ Top Actives: {self.config.screener_top_actives}\n"
+                f"├ Top Movers: {self.config.screener_top_movers}\n"
+                f"└ ~3 API calls per scan\n\n"
+                f"_Tiered filtering available as fallback_"
+            )
+
+        # Tiered filtering mode
         if not self._stats.build_timestamp:
-            return "No universe built yet"
+            return f"{header}No universe built yet"
 
         if self._stats.error_message:
             return (
-                f"*Universe Status*\n\n"
+                f"{header}"
                 f"*Build failed*\n"
                 f"Error: {self._stats.error_message}\n"
                 f"Using fallback: {len(FALLBACK_UNIVERSE)} symbols"
@@ -281,7 +317,7 @@ class UniverseManager:
         source = "Dynamic (Alpaca)" if is_dynamic else "Fallback (hardcoded)"
 
         return (
-            f"*Universe Status*\n\n"
+            f"{header}"
             f"{emoji} Source: {source}\n"
             f"Symbols: {self._stats.tier3_filtered:,}\n\n"
             f"*Filtering Pipeline:*\n"

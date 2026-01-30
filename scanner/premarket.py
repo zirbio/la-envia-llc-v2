@@ -335,20 +335,182 @@ class PremarketScanner:
         self.premarket_context.clear()
         logger.info("Premarket scanner reset")
 
-    async def scan_dynamic_universe(self) -> list[ScanResult]:
+    async def scan_with_screener(self) -> list[ScanResult]:
         """
-        Scan the dynamic universe from UniverseManager with sentiment analysis.
+        Scan using Screener API as primary source (more efficient).
 
-        Uses the pre-built high-volume universe instead of hardcoded list.
-        Falls back to SCAN_UNIVERSE_FALLBACK if dynamic universe not available.
+        Uses Alpaca's pre-calculated most active stocks and market movers,
+        then gets snapshots for gap calculation. This reduces API calls from
+        ~40 to ~3 while improving coverage.
+
+        Flow:
+        1. Get candidates from Screener API (most actives + market movers)
+        2. Get snapshots for all candidates (ONE API call)
+        3. Filter by gap and price criteria
+        4. Add sentiment analysis
+        5. Return sorted results
 
         Returns:
             List of ScanResult with sentiment scores, sorted by score
         """
-        # Import here to avoid circular import
+        self.candidates = []
+        screener_config = settings.universe
+
+        logger.info("🔍 Using Screener API for candidate discovery...")
+
+        try:
+            # Step 1: Get candidates from Screener API
+            screener_symbols = market_data.get_screener_candidates(
+                min_price=self.config.min_price,
+                max_price=self.config.max_price,
+                top_actives=screener_config.screener_top_actives,
+                top_movers=screener_config.screener_top_movers
+            )
+
+            if not screener_symbols:
+                logger.warning("Screener API returned no candidates, falling back to tiered filtering")
+                return await self._fallback_to_tiered_scan()
+
+            logger.info(f"Screener: {len(screener_symbols)} candidates from most actives + movers")
+
+            # Step 2: Get snapshots for all candidates (ONE API call)
+            snapshots = market_data.get_snapshots_batch(screener_symbols)
+
+            if not snapshots:
+                logger.warning("Snapshot API returned no data, falling back to tiered filtering")
+                return await self._fallback_to_tiered_scan()
+
+            # Step 3: Filter by gap criteria and build candidates
+            for symbol, data in snapshots.items():
+                gap_pct = data['gap_pct']
+
+                # Check minimum gap
+                if abs(gap_pct) < self.config.min_gap_percent:
+                    continue
+
+                # Check price range (already filtered by screener, but double-check)
+                price = data['price']
+                if price < self.config.min_price or price > self.config.max_price:
+                    continue
+
+                # Skip if spread is too wide (liquidity concern)
+                if data['spread_pct'] > 1.0:  # >1% spread
+                    logger.debug(f"{symbol}: Spread too wide ({data['spread_pct']:.2f}%)")
+                    continue
+
+                # Calculate score
+                score = self._calculate_score(
+                    gap_pct=abs(gap_pct),
+                    pm_volume=data['daily_volume'],
+                    avg_volume=data['daily_volume'],  # Using daily volume as proxy
+                    price=price
+                )
+
+                # Cache premarket context (we don't have premarket H/L from snapshots,
+                # so use price as placeholder - will be refined later)
+                self.premarket_context[symbol] = PremktContext(
+                    symbol=symbol,
+                    premarket_high=price * 1.01,  # Estimate +1%
+                    premarket_low=price * 0.99,   # Estimate -1%
+                    prev_close=data['prev_close'],
+                    open_price=0.0
+                )
+
+                self.candidates.append(ScanResult(
+                    symbol=symbol,
+                    prev_close=data['prev_close'],
+                    current_price=price,
+                    gap_percent=gap_pct,
+                    premarket_volume=data['daily_volume'],
+                    avg_daily_volume=data['daily_volume'],
+                    score=score,
+                    premarket_high=price * 1.01,
+                    premarket_low=price * 0.99
+                ))
+
+            logger.info(f"Gap filter: {len(self.candidates)} candidates with >= {self.config.min_gap_percent}% gap")
+
+        except Exception as e:
+            logger.error(f"Error in screener scan: {e}")
+            return await self._fallback_to_tiered_scan()
+
+        if not self.candidates:
+            logger.info("No candidates found via screener")
+            return self.candidates
+
+        # Step 4: Add sentiment analysis if enabled
+        if self.sentiment_config.enabled:
+            logger.info(f"Analyzing sentiment for {len(self.candidates)} candidates...")
+            try:
+                candidate_symbols = [c.symbol for c in self.candidates]
+                sentiment_results = await sentiment_analyzer.get_batch_sentiment(candidate_symbols)
+
+                for candidate in self.candidates:
+                    if candidate.symbol in sentiment_results:
+                        sent = sentiment_results[candidate.symbol]
+                        candidate.sentiment_score = sent.score
+                        candidate.sentiment_news_count = sent.news_count
+
+                        # Set label
+                        signal_config = settings.trading.signal_config
+                        if sent.score >= signal_config.max_sentiment_short:
+                            candidate.sentiment_label = "Alcista"
+                        elif sent.score <= signal_config.min_sentiment_long:
+                            candidate.sentiment_label = "Bajista"
+                        else:
+                            candidate.sentiment_label = "Neutral"
+
+                        # Boost score based on sentiment alignment
+                        sentiment_boost = self._calculate_sentiment_boost(
+                            candidate.gap_percent, sent.score
+                        )
+                        candidate.score += sentiment_boost
+            except Exception as e:
+                logger.error(f"Error in sentiment analysis: {e}")
+
+        # Step 5: Sort and limit results
+        self.candidates.sort(key=lambda x: x.score, reverse=True)
+        self.candidates = self.candidates[:self.config.max_watchlist_size]
+
+        logger.info(f"✅ Screener scan complete: {len(self.candidates)} final candidates")
+        return self.candidates
+
+    async def _fallback_to_tiered_scan(self) -> list[ScanResult]:
+        """
+        Fallback to tiered filtering when Screener API fails.
+
+        Uses UniverseManager's cached universe or fallback list.
+        """
+        logger.warning("Falling back to tiered universe scan...")
+
+        from scanner.universe import universe_manager
+        universe = universe_manager.get_cached_universe()
+
+        if not universe:
+            logger.warning("No universe available, using fallback")
+            universe = SCAN_UNIVERSE_FALLBACK
+
+        return await self.scan_watchlist_with_sentiment(universe)
+
+    async def scan_dynamic_universe(self) -> list[ScanResult]:
+        """
+        Scan the dynamic universe with automatic method selection.
+
+        Uses Screener API when enabled (more efficient), otherwise falls back
+        to tiered filtering from UniverseManager.
+
+        Returns:
+            List of ScanResult with sentiment scores, sorted by score
+        """
+        screener_config = settings.universe
+
+        # Use Screener API if enabled (default: True)
+        if screener_config.use_screener_api:
+            return await self.scan_with_screener()
+
+        # Fallback to tiered filtering
         from scanner.universe import universe_manager
 
-        # Get the cached universe (or fallback)
         universe = universe_manager.get_cached_universe()
 
         if not universe:
@@ -357,7 +519,6 @@ class PremarketScanner:
 
         logger.info(f"Scanning dynamic universe: {len(universe)} symbols")
 
-        # Use existing scan method with sentiment
         return await self.scan_watchlist_with_sentiment(universe)
 
     def format_watchlist_message(self) -> str:
